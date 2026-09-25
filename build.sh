@@ -24,6 +24,7 @@ mkdir -p out
 "$CC" -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter \
     -fPIE -pie -static-libstdc++ -Wl,--exclude-libs,ALL \
     src/audio-probe.cpp -o out/audio-probe -llog
-"$CC" -std=c++17 -O2 -Wall -Wno-unused-parameter -fPIE -pie -static-libstdc++ -Wl,--exclude-libs,ALL \
-    src/audio-probe-raw.cpp -o out/audio-probe-raw -llog
+CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
+"$CC_C" -std=gnu11 -O2 -Wall -fPIE -pie \
+    src/audio-probe-raw.c -o out/audio-probe-raw
 ls -l out/
