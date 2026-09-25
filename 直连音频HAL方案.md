@@ -241,3 +241,47 @@ DONE fed=284456 framesWritten=284456 xrun=0
   而跑 takeover 会杀掉/复活当前桌面 ⇒ **先征求用户同意**，不要自作主张。
 - 若 `start audioserver` 不行，回退到 §10.1 的直连 HAL（继续攻 flags 那一层）。
 - 容器侧接线（desk-takeover / desk-stop）、FIFO 权限、以及首帧真实音频试听：**约时间**再做。
+
+
+## 11. 【09-26 00:37 轮 ★定案】轮内 audioserver 的真阻塞点 = `waitForService("activity")`
+
+第二轮（改用 `sudo setsid` 正常起，GPU 已恢复）把 §38 那条旧结论**用栈证实了**：
+
+```
+#03 libbinder: CppBackendShim::waitForService(String16 const&)
+#04 libactivitymanager_aidl: ActivityManager::getService()
+#05 libactivitymanager_aidl: ActivityManager::linkToDeath()
+#06 libaudiopolicyservice: AudioPolicyService::UidPolicy::registerSelf()
+#07 libaudiopolicyservice: AudioPolicyService::onFirstRef()
+#08 /system/bin/audioserver main+528
+```
+
+- 表现：`init.svc.audioserver=running`、进程活着（State S），但
+  `service check media.audio_flinger` / `media.aaudio` = **not found** ⇒ AAudio `openStream` 卡死
+  （本轮 `probe-rc=124`、桥拿不到流）。**轮内一声没出过**，全程零帧/超时。
+- **上一轮（00:18）的 `AAUDIO-OK` 是竞态运气**：那次 `stop` 后 1–2 s 就 `ctl.start audioserver`，
+  当时 system_server 还没走完退出、`activity` 名字还挂在 servicemanager 上。不能当设计。
+- ⇒ `AUDIO_BRIDGE=1` 里那句 `ctl.start system_suspend + ctl.start audioserver` **本身不够**。
+
+### 11.1 正在试的解法：轮内挂一个 `activity` 最小桩 binder
+
+`src/activity-stub.c`：dlopen libbinder_ndk，`AIBinder_Class_define("android.app.IActivityManager")`
++ `AIBinder_new` + `AServiceManager_addService(b, "activity")`，`ALIVE` 秒后退出（交还时真 system_server
+自己注册 `activity`，桩不留场）。已实测到的事实：
+
+1. **SELinux 放行**：su 域 `add_service("activity")` 返回 `st=0`（没碰 enforcing）。
+2. 挂上后 audioserver **立刻解阻塞并开始调用桩**（日志出现 `STUB-REQ code=0x6 / 0x2 / 0x4`，反复）。
+3. 但 `media.audio_flinger` / `media.aaudio` 仍未注册 ⇒ 桩的**回复不被接受**：手搓 `AIBinder_Class`
+   时异常头没人替我们写，而本设备 libbinder_ndk **不导出** `AParcel_writeNoException`/`writeExceptionCode`
+   （只导出 `AParcel_writeStatusHeader`）。已改成显式 `AParcel_writeInt32(out,0)` = EX_NONE
+   并顺带打请求码/前三个 int（提交 `ed6b4b7`），**下次开机第一件事就是在轮内验这条**。
+
+### 11.2 两条教训（我自己的错，写死在这）
+
+- **绝不用 `systemd-run` 起接管轮**：transient 单元默认 `DevicePolicy=auto` + `DeviceAllow` 空
+  ⇒ 不在白名单的字符设备 open 全被 cgroup 拦（renderD128/kgsl/snd/input 一起废），
+  kwin 直接软渲染（实测 `MESA-EGL: failed to open /dev/dri/renderD128: 权限不够` + `CAP_SYS_NICE` 被拒）。
+  跑轮只能用 `desk-takeover.sh` 自带的 setsid 脱钩（`sudo setsid bash ...`）。
+- **`test -r/-w` 不是设备可用性判据**：它走 `access(2)`，看不见 cgroup deny；判 GPU 节点必须**真 open**
+  （`dd if=/dev/dri/renderD128 of=/dev/null bs=1 count=0`）。desk-takeover 里那条 `GPU-PERM` 探针
+  因此历史上 FAIL 68 次也不可信，待改。本轮真 open 成功（节点 `crw-rw-rw- root:graphics`）。
