@@ -55,6 +55,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: audio-probe-aarch64
-          path: out/audio-probe
+          name: audio-bridge-bins
+          path: out/
           if-no-files-found: error
