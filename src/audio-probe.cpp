@@ -105,6 +105,27 @@ static int raw_fallback(const char* svc, uint32_t code) {
   return st == 0 ? 0 : 26;
 }
 
+// 对照桥的原文："裸句柄需 associateClass 才能 prepare"。
+// 真值实验：直接抄桥的 IBluetoothHci descriptor 给 audio-probe 用（它必过），再试 AAudio service。
+static int assoc_experiment(AIBinder* b, const char* tag) {
+  void* h = dlopen("/system/lib64/libbinder_ndk.so", RTLD_NOW);
+  auto assoc = (int(*)(AIBinder*, void*))dlsym(h, "AIBinder_associateClass");
+  auto cdef = (void*(*)(const char*, void*, void*, void*))dlsym(h, "AIBinder_Class_define");
+  auto cdtor = (void(*)(void*))dlsym(h, "AIBinder_Class_setOnDestroy");
+  (void)cdtor;
+  if (!assoc || !cdef) { fprintf(stderr, "%s: no class syms\n", tag); return 9; }
+  static int dummy;
+  void* cls = cdef(tag, nullptr, nullptr, nullptr);
+  if (!cls) { fprintf(stderr, "%s: define failed\n", tag); return 10; }
+  int r = assoc(b, cls);
+  printf("DIAG %s associateClass r=%d\n", tag, r); fflush(stdout);
+  AParcel* in = nullptr;
+  auto prep = (int(*)(AIBinder*, AParcel**))dlsym(h, "AIBinder_prepareTransaction");
+  int st = prep(b, &in);
+  printf("DIAG %s prepare-after-assoc st=%d\n", tag, st); fflush(stdout);
+  return st;
+}
+
 int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
   const uint32_t code = 11;  // getAudioPorts
@@ -119,6 +140,7 @@ int main(int argc, char** argv) {
   void* vptr = *(void**)mod;
   void* impl = *(void**)((char*)mod + 8);
   printf("DIAG mod=%p vptr=%p impl=%p\n", (void*)mod, vptr, (void*)impl);
+  if (argc > 2) { assoc_experiment(mod, argv[2]); }
   AParcel* in = NULL;
   binder_status_t rc = B.Prepare(mod, &in);
   if (rc != 0) {
