@@ -87,6 +87,8 @@ int main(int argc, char** argv) {
   void* (*getContextObject)(void*, const void*) = R(lb, "_ZN7android12ProcessState16getContextObjectERKNS_2spINS_7IBinderEEE");
   void* (*smAsInterface)(const void*) = R(lb, "_ZN7android2os15IServiceManager11asInterfaceERKNS_2spINS_7IBinderEEE");
   int32_t (*smGetService)(void*, const cxstring*, void**) = R(lb, "_ZN7android2os16BpServiceManager10getServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
+  /* `service check` 证明 checkService 路对 audio 有效；getService 返空时兜底（同为值返回 sp） */
+  int32_t (*smCheckService)(void*, const cxstring*, void**) = R(lb, "_ZN7android2os16BpServiceManager12checkServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
   int32_t (*transact)(void*, uint32_t, const void*, void*, uint32_t) = R(lb, "_ZN7android8BpBinder8transactEjRKNS_6ParcelEPS1_j");
   void (*parcelCtor)(void*) = R(lb, "_ZN7android6ParcelC1Ev");
   int32_t (*writeToken)(void*, const void*) = R(lb, "_ZN7android6Parcel19writeInterfaceTokenERKNS_8String16E");
@@ -114,6 +116,11 @@ int main(int argc, char** argv) {
   char slot[8] = {};
   void* binder = stub_call3(smGetService, sm, &s, slot);   /* 值返回 sp：x8 槽；出错返回空 sp */
   printf("DIAG ours-getService binder=%p\n", binder); fflush(stdout);
+  if (!binder && smCheckService) {
+    char slotc[8] = {};
+    binder = stub_call3(smCheckService, sm, &s, slotc);
+    printf("DIAG checkService binder=%p\n", binder); fflush(stdout);
+  }
   { /* 对照组：`service` 二进制用的 defaultServiceManager() 对象（返回引用，无需 stub） */
     void* (*defaultSM)(void) = R(lb, "_ZN7android21defaultServiceManagerEv");
     if (defaultSM) {
