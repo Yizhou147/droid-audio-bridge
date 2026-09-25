@@ -73,7 +73,7 @@ static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
     /* 读不动：多半撞对象界 —— 步进 4 探路，连 16 步不动才算失败 */
     stall++;
     if (stall > 4 && i + 4 < n) { buf[i] = buf[i+1] = buf[i+2] = buf[i+3] = 0xEE; i += 4; stall = 0; continue; }
-    if (stall > 20) { printf("spill stuck @%d\n", i); return -2; }
+    if (stall > 20) { if (i + 8 >= n) { *lenOut = i; return 0; } printf("spill stuck @%d\n", i); return -2; }
   }
   *lenOut = n;
   return 0;
