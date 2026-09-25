@@ -63,7 +63,7 @@ struct pair { void* x0ret; void* slot; };
 extern struct pair stub_dsm(void* fn);
   void* ps = stub_call0((void*)ps_self);
   printf("DIAG ps=%p\n", ps); fflush(stdout);
-  struct pair dp = stub_dsm((void*)dsm_get());
+  struct pair dp = stub_dsm((void*)dsm_get);
   void* smRef = dp.x0ret;
   void* smViaSlot = dp.slot ? *(void**)dp.slot : NULL;
   printf("DIAG dsm: x0ret=%p slotval=%p->obj=%p\n", dp.x0ret, dp.slot, smViaSlot); fflush(stdout);
