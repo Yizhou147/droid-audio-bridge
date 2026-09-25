@@ -16,6 +16,7 @@ typedef struct { char* ptr; size_t size; size_t cap_lsb1; } cxstring; /* std::st
  * 这两个 stub 负责垫好 x8 槽再转交结果。 */
 extern void* stub_call0(void* fn);
 extern void* stub_call1(void* fn, void* a0);
+extern void* stub_call2(void* fn, void* a0, void* a1);   /* 成员函数：x0=this, x1=arg, x8=sret */
 __asm__(
 ".text\n"
 ".globl stub_call0\n"
@@ -35,6 +36,18 @@ __asm__(
 "  add x8, sp, #16\n"
 "  mov x9, x0\n"
 "  mov x0, x1\n"
+"  blr x9\n"
+"  ldr x0, [sp, #16]\n"
+"  ldp x29, x30, [sp], #32\n"
+"  ret\n"
+".globl stub_call2\n"
+"stub_call2:\n"
+"  stp x29, x30, [sp, #-32]!\n"
+"  mov x29, sp\n"
+"  add x8, sp, #16\n"
+"  mov x9, x0\n"
+"  mov x0, x1\n"
+"  mov x1, x2\n"
 "  blr x9\n"
 "  ldr x0, [sp, #16]\n"
 "  ldp x29, x30, [sp], #32\n"
@@ -73,7 +86,7 @@ int main(int argc, char** argv) {
   printf("PS=%p\n", ps); fflush(stdout);
 
   char nullSp[8] = {};
-  void* ctxSp = stub_call1(getContextObject, nullSp);   /* 返回 sp<IBinder>（值） */
+  void* ctxSp = stub_call2(getContextObject, ps, nullSp);  /* 成员：this=ps + const sp& ，值返回 sp */
   if (!ctxSp) { fprintf(stderr, "STEP1-FAIL getContextObject null\n"); return 4; }
   void* sm = stub_call1(smAsInterface, ctxSp);           /* 返回 sp<IServiceManager>（值），首格即裸 ptr=sm 本体 */
   if (!sm) { fprintf(stderr, "STEP2-FAIL asInterface null\n"); return 5; }
