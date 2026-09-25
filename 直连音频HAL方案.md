@@ -145,3 +145,70 @@ reply=19164B（与 service call 金样字节数一致，52 端口 + speaker/bt_a
   **StreamDescriptor/FMQ/AudioBuffer/Position/Reply/Command** 全套——M2 的 ring 协议直接 dlsym 这些
   读回包（它们是真码不是 inline）。
 - 用户在看视频（A2DP 活跃）：今晚对 `default` 模块零试探；只读查询不限。
+
+
+## 10. 【09-25 深夜 ★架构改道】AAudio 捷径实测通过，直连 HAL 降为后备
+
+### 10.1 直连路线的最后事实（存档，别再从头猜）
+
+反汇编设备自带 `/vendor/lib64/android.hardware.audio.core-V2-ndk.so`（md5 `1518b404…41b2`，
+与设备逐字节一致）里**服务端**那份 `IModule::OpenOutputStreamArguments::readFromParcel`（`0x37670`），
+得到 code=15 的权威入参布局（`BpModule::openOutputStream@0x3bdf0` 确认码 15 + `writeInt32(0)` 异常位 +
+`Arguments::writeToParcel`）：
+
+| 顺序 | 字段 | 读端落点 | 备注 |
+|---|---|---|---|
+| 1 | `i32 size` | 栈 | 校验 `size>=4`；且**每读一个字段前先查"已消费>=size"→ 跳末尾并返回 OK**（可用它做信封自检） |
+| 2 | `i32 A` | `this+0` | 语义未定（试过 0/1/2/23/53） |
+| 3 | `i32 presence` | 栈 | **必须非 0**，否则直接 `return 0x80000008`（= 我们一直看到的 `-2147483640`） |
+| 4 | `SourceMetadata` | `this+8` | 自身=`[size][AParcel_readParcelableArray]`，数组=`[head][len][元素…]`（head/len 都试过） |
+| 5 | `i32 presence` | 栈 | AudioOffloadInfo，=0 合法 |
+| 6 | `i64` | `this+0x88` | 置 0 |
+| 7/8 | 两个可空 binder | `+0x90/+0xa0` | `IStreamCallback` / `IStreamOutEventCallback`，写 `i32 0` |
+
+**结论**：`ARGS2` 扫描（`A∈{0,1,2,53}×head∈{0,1}×pres=1` + 只发 `[size=8][A]` 的信封自检变体）
+**全部 `st=0x80000008`**。按读端逻辑，最后那个变体本该在读完 A 后就"跳末尾返回 OK"，却也失败
+⇒ **拒因不在 readFromParcel 体内**，而在更早的一层。剩余候选（下次再啃）：
+`BpModule` 给 `AIBinder_transact` 传的 `flags=0x10000000`（我们一直传 0）；或该服务对 code 15
+走的是 `FLAG_SENDING_REPLIES`/异步回包形态。要出声前须先约时间。
+
+### 10.2 ★改道理由：audioserver 活着时，AAudio 一发即通
+
+同一时刻设备上 `init.svc.audioserver=running`（双态共存），纯 NDK 探针 `aaudio-probe`：
+
+```
+STEP1 openStream rc=0
+STEP2 sr=48000 ch=2 fmt=2 perf=10 sharing=1 burst=3844 cap=7688 device=2
+STEP3 requestStart rc=0
+STEP4 wrote totalFrames=153760 in 40 writes; framesWritten=153760 xrun=0
+```
+
+即 **48k/立体声/S16、LOW_LATENCY、拿到 EXCLUSIVE(mmap) 环、800ms 内 15.4 万帧零 xrun、输出设备 id=2**，
+全程喂全零静音帧（无声音）。这条路的 binder/AGM/system_suspend/音量/路由全由平台自己干，
+不需要 §10.1 那套手搓布局，也不需要 M2 的 AudioRingBuffer 协议。
+
+**新架构**：容器 PipeWire（混音、按应用音量）→ sink 的 monitor → `pw-cat -r` 裸 PCM →
+FIFO（`/data/local/tmp/audio.fifo`，两侧同路径可见）→ `aa-bridge`（bionic，dlopen libaaudio）→ AAudio → audioserver。
+
+### 10.2b 桥本体已跑通（喂全零 = 静音，无声）
+
+设备侧 `mkfifo` + `dd if=/dev/zero | aa-bridge`（MS=4000）：
+
+```
+STREAM sr=48000 ch=2 fmt=2 burst=3844 cap=7688 device=2
+FIFO open，开始搬运（喂零=静音）
+t=2225ms fed=99944 framesWritten=99944 xrun=0
+FIFO EOF（容器侧收流）
+DONE fed=157604 framesWritten=157604 xrun=0
+```
+
+即 **M1（开流）+ M2（数据面）在这条路上一起解决了**：不需要 createMmapBuffer 事务码、
+不需要 AudioRingBuffer 协议、不需要手搓 AudioConfig。剩下的是接线与真实音频试听。
+
+### 10.3 待验（需要用户点头才能做的那一步）
+
+- 接管轮里 Android 被 `stop`（class core 全停），届时 `start audioserver` 能否干净起来 =
+  这条改道成立的**唯一前提**。§38 记过 audioserver 卡住的迹象，必须实跑一轮 takeover 才能定论，
+  而跑 takeover 会杀掉/复活当前桌面 ⇒ **先征求用户同意**，不要自作主张。
+- 若 `start audioserver` 不行，回退到 §10.1 的直连 HAL（继续攻 flags 那一层）。
+- 容器侧接线（desk-takeover / desk-stop）、FIFO 权限、以及首帧真实音频试听：**约时间**再做。
