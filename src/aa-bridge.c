@@ -1,12 +1,19 @@
 /* aa-bridge：容器侧 PCM → AAudio 外放（接管轮音频桥的实际产品形态）。
- * 读一个 FIFO（容器内 pw-cat/pw-record 把 PipeWire 混音的 monitor 灌进来），
- * 逐 burst 写进 AAudio 输出流。audioserver 活着即可，不需要碰 vendor HAL 的 binder 布局。
- * 用法：su -c '/data/local/tmp/aa-bridge /data/local/tmp/audio.fifo'
+ * 取流两种：PORT=<n> 在 127.0.0.1:<n> 监听（容器与安卓共享 netns，实测互通）；
+ * 或给一个 FIFO 路径（容器 rootfs 是 loop 镜像、两侧看不到同一个路径，故仅作后备）。
+ * 数据面：读到的裸 PCM 攒满一个 burst 就 AAudioStream_write，阻塞写自带背压。
+ * audioserver 活着即可，不需要碰 vendor HAL 的 binder 布局（见方案 §10）。
+ * 用法：su -c 'PORT=44777 /data/local/tmp/aa-bridge'
+ *       su -c '/data/local/tmp/aa-bridge /data/local/tmp/audio.fifo'
  * 调参：SR=48000 CH=2 FMT=2(PCM_I16)|1(PCM_FLOAT) APM=10(LOW_LATENCY)|0 SHR=0 MS=0(不限量)
  * 验证期一律喂 /dev/zero（静音），不发声。 */
 #include <dlfcn.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +61,28 @@ static int env(const char* k, int dflt) {
 static int64_t nowms(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static int open_source(const char* path, int port) {
+  if (port <= 0) return open(path, O_RDONLY);      /* FIFO：阻塞等容器侧打开写端 */
+  /* 容器与安卓共享 netns（实测 toybox nc ↔ 容器 nc 互通）⇒ 环回 TCP 是最省事的传输 */
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return -1;
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a; memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_port = htons((uint16_t)port);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(s, (struct sockaddr*)&a, sizeof a) || listen(s, 4)) { close(s); return -1; }
+  int c = accept(s, NULL, NULL);                   /* 单消费者：一次只收一个 feeder */
+  close(s);
+  if (c >= 0) {
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    int big = 1 << 20;
+    setsockopt(c, SOL_SOCKET, SO_RCVBUF, &big, sizeof big);
+  }
+  return c;
 }
 
 int main(int argc, char** argv) {
@@ -113,9 +142,10 @@ int main(int argc, char** argv) {
   if (rc != 0) { fprintf(stderr, "requestStart rc=%d %s\n", rc,
                           A.resultText ? A.resultText(rc) : ""); A.close(st); return 6; }
 
-  int fd = open(path, O_RDONLY);                   /* 阻塞等容器侧打开写端 */
-  if (fd < 0) { fprintf(stderr, "open %s: %s\n", path, strerror(errno)); A.stop(st); A.close(st); return 7; }
-  printf("FIFO open，开始搬运（喂零=静音）\n"); fflush(stdout);
+  int fd = open_source(path, env("PORT", 0));
+  if (fd < 0) { fprintf(stderr, "取流失败 %s%s: %s\n", env("PORT", 0) ? "tcp-listen" : path,
+                          "", strerror(errno)); A.stop(st); A.close(st); return 7; }
+  printf("SOURCE ready（喂零=静音）\n"); fflush(stdout);
 
   int burst = A.burst(st); if (burst <= 0) burst = 192;
   size_t capbytes = (size_t)burst * bpf;
