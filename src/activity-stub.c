@@ -32,16 +32,25 @@ static struct {
 
 static void noop_create(void* arg) { (void)arg; }
 static void noop_destroy(void* arg) { (void)arg; }
-/* 一律"成功+空回复"：调用方需要的 void 方法（registerUidObserver 等）即可通过 */
+/* 一律"成功+空回复"：调用方需要的 void 方法（registerUidObserver 等）即可通过。
+ * 注意：手搓 AIBinder_Class 时回复的异常头**没人替我们写**（本设备 libbinder_ndk 不导出
+ * AParcel_writeNoException / writeExceptionCode），所以显式 writeInt32(out,0) = EX_NONE。 */
 static int32_t on_transact(AIBinder* binder, uint32_t code, const AParcel* in, AParcel* out) {
-  (void)binder; (void)in;
-  printf("STUB-REQ code=0x%x\n", code); fflush(stdout);
-  if (out) {
-    int (*wEx)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeExceptionCode");
-    if (wEx) wEx(out, 0);
+  (void)binder;
+  int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+  int (*rI32)(const AParcel*, int32_t*) = (void*)dlsym(N.h, "AParcel_readInt32");
+  size_t (*dsz)(const AParcel*) = (void*)dlsym(N.h, "AParcel_getDataSize");
+  if (in && rI32) {
+    int32_t a = -1, b = -1, c = -1;
+    rI32(in, &a); rI32(in, &b); rI32(in, &c);
+    printf("STUB-REQ code=0x%x size=%zu 前三个 int=%d %d %d\n", code,
+           dsz ? dsz(in) : 0, a, b, c);
+  } else {
+    printf("STUB-REQ code=0x%x\n", code);
   }
-  (void)code;
-  return 0;                                  /* EX_NONE */
+  fflush(stdout);
+  if (out && wI32) wI32(out, 0);            /* exception = EX_NONE */
+  return 0;
 }
 
 int main(void) {
