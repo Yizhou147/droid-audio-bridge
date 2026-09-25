@@ -62,7 +62,7 @@ int main(void) {
   S(setSharingMode, "AAudioStreamBuilder_setSharingMode");
   S(setUsage, "AAudioStreamBuilder_setUsage");
   S(setContentType, "AAudioStreamBuilder_setContentType");
-  S(open, "AAudioStream_openStream");
+  S(open, "AAudioStreamBuilder_openStream");
   S(start, "AAudioStream_requestStart");
   S(write, "AAudioStream_write");
   S(stop, "AAudioStream_requestStop");
@@ -76,7 +76,7 @@ int main(void) {
   S(capacity, "AAudioStream_getBufferCapacityInFrames");
   S(xrun, "AAudioStream_getXRunCount");
   S(written, "AAudioStream_getFramesWritten");
-  S(deviceId, "AAudioStream_getAudioDeviceId");
+  S(deviceId, "AAudioStream_getDeviceId");
   *(void**)&A.resultText = dlsym(A.h, "AAudio_convertResultToText");
 
   if (!A.create || !A.open || !A.start || !A.write || !A.stop || !A.close ||
