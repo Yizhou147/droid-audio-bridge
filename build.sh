@@ -33,4 +33,7 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
     src/audio-probe-dt.c -o out/audio-probe-dt \
     -Ldevice-libs -lbinder -lutils \
     -Wl,--allow-shlib-undefined -Wl,-rpath,/system/lib64
+
+"$CC_C" -std=gnu11 -O2 -Wall -fPIE -pie \
+    src/audio-probe-ndk.c -o out/audio-probe-ndk
 ls -l out/
