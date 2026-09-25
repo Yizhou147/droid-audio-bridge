@@ -27,4 +27,10 @@ mkdir -p out
 CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 "$CC_C" -std=gnu11 -O2 -Wall -fPIE -pie \
     src/audio-probe-raw.c -o out/audio-probe-raw
+CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
+# DT_NEEDED 链接版：用真设备库当链接桩（运行时加载系统原生同名库）
+"$CC_C" -std=gnu11 -O2 -Wall -fPIE -pie \
+    src/audio-probe-dt.c -o out/audio-probe-dt \
+    -Ldevice-libs -lbinder -lutils \
+    -Wl,--allow-shlib-undefined -Wl,-rpath,/system/lib64
 ls -l out/
