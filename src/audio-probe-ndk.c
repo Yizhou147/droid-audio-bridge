@@ -34,6 +34,54 @@ static int noop_transact(AIBinder* b, uint32_t c, const AParcel* in, AParcel* ou
   (void)b; (void)c; (void)in; (void)out; return 0;
 }
 
+/* M1a：在 11 号回包里找 name=="speaker" 的 AudioPortConfig 元素，
+ * 原字节搬运进 openOutputStream(15)：parcel = ex0 | <obj bytes> | rate | fmt | mode | flags…
+ * 判据：reply 有 binder 对象头（0x40 起）且异常=0。不写流=不出声。 */
+static int find_speaker(const uint8_t* b, int len, int* hdr_off, int* size) {
+  static const uint8_t pat[] = {0x07,0,0,0,'s',0,'p',0,'e',0,'a',0,'k',0,'e',0,'r',0,0,0};
+  int o = 12;  /* ex|count|total 之后 */
+  while (o + 8 <= len) {
+    int ver, sz; memcpy(&ver, b+o, 4); memcpy(&sz, b+o+4, 4);
+    if (ver != 1 || sz < 12 || sz > 4096 || o + sz > len) return -1;
+    if (memmem(b + o + 8, sz - 8, pat, sizeof pat)) { *hdr_off = o - 4; *size = 4 + sz; return 0; } /* 含 vector 计数头? 元素头从 ver 起 */
+    o += sz;
+  }
+  return -1;
+}
+
+/* ===== M1b：speaker 字节搬运开流（无声验证：只 open，不写数据）=====
+ * 1) transact(11) 全字节抠回（AParcel_readByte 循环 + setDataPosition 回零）
+ * 2) 扫 UTF-16 "speaker\0"，向前回贴 [ver=1][size] 对象头，切出元素
+ * 3) openOutputStream(15) parcel = ex0 + 元素字节 + {rate 存在位=1, 48000, fmtType=1(PCM),
+ *    pcm=1(INT_16), mode=0, flags=0}（AudioConfig 头部字段按常见顺序试探；失败就打印异常码）
+ * 判据：reply exception==0 且头 4 字节是 flat binder 对象(0x40) = 流已开成。 */
+static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
+  int (*setPos)(const void*, int32_t) = (void*)dlsym(N.h, "AParcel_setDataPosition");
+  int (*rdByte)(const void*, int8_t*) = (void*)dlsym(N.h, "AParcel_readByte");
+  size_t (*dsize)(const void*) = (size_t(*)(const void*))N.Parcel_dataSize;
+  int n = (int)dsize(out);
+  if (n > cap) n = cap;
+  if (!setPos(out, 0)) return -1;
+  for (int i = 0; i < n; i++) { int8_t c; if (rdByte(out, &c)) return -2; buf[i] = (uint8_t)c; }
+  *lenOut = n;
+  return 0;
+}
+
+static int find_speaker_elem(const uint8_t* b, int len, int* start, int* size) {
+  static const uint8_t pat[] = {'s',0,'p',0,'e',0,'a',0,'k',0,'e',0,'r',0,0,0};
+  for (int t = 16; t + (int)sizeof pat < len; t++) {
+    if (!memcmp(b + t, pat, sizeof pat)) {
+      /* 回扫对象头：int32 size 紧跟 int32 ver==1，且元素区覆盖 t */
+      for (int o = t - 8; o > 12 && o >= t - 300; o -= 4) {
+        int32_t ver, sz; memcpy(&ver, b + o, 4); memcpy(&sz, b + o + 4, 4);
+        if (ver == 1 && sz >= 40 && o + sz >= t + (int)sizeof pat) { *start = o - 4; *size = sz + 8; return 0; } /* -4: 带上外层的 name 头? 先按 [ver][size] 起 */
+      }
+      return -2;
+    }
+  }
+  return -3;
+}
+
 int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
   uint32_t code = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 11;
@@ -76,6 +124,39 @@ int main(int argc, char** argv) {
       N.Parcel_readInt32(out, &m);
       printf("DIAG exception=%d header=%d size=%zu\n", ex, m, N.Parcel_dataSize(out));
       printf("VERDICT: %s\n", (ex == 0) ? "OK 链路全通" : "链路通但异常非0");
+      if (getenv("OPEN_STREAM")) {
+        int hoff = -1, hsz = 0;
+        static uint8_t blob[65536];
+        int blen = 0;
+        if (parcel_spill(out, blob, sizeof blob, &blen)) { printf("M1b FAIL spill\n"); }
+        else {
+          int es = -1, esz = -1;
+          int fr = find_speaker_elem(blob, blen, &es, &esz);
+          printf("M1b find=%d elem@%d size=%d\n", fr, es, esz); fflush(stdout);
+          if (fr == 0) {
+            AParcel* in2 = NULL; AParcel* out2 = NULL;
+            int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+            int (*wByte)(AParcel*, int8_t) = (void*)dlsym(N.h, "AParcel_writeByte");
+            if (N.Prepare(b, &in2) == 0) {
+              wI32(in2, 0);                                   /* AudioConfig.port 存在位+对象：先写对象裸字节 */
+              for (int i = 0; i < esz; i++) wByte(in2, (int8_t)blob[es + i]);
+              wI32(in2, 1); wI32(in2, 48000);                 /* Int{value=48000} */
+              wI32(in2, 1);                                   /* format 存在位 */
+              wI32(in2, 1); wI32(in2, 1);                     /* PCM + INT_16 */
+              wI32(in2, 0);                                   /* mode NORMAL */
+              wI32(in2, 0);                                   /* flags */
+              int st2 = N.Transact(b, 15, &in2, &out2, 0);
+              printf("M1b openOutputStream st=%d\n", st2); fflush(stdout);
+              if (out2) {
+                int32_t ex2 = -1; N.Parcel_readInt32(out2, &ex2);
+                int32_t obj = -1; N.Parcel_readInt32(out2, &obj);
+                printf("M1b reply ex=%d first=%#x %s\n", ex2, (unsigned)obj,
+                       (ex2 == 0 && obj == 0x40) ? "VERDICT-M1: 流已开成(flat binder obj)" : "看码定位缺字段");
+              }
+            }
+          }
+        }
+      }
     }
   }
   N.DecStrong(b);
