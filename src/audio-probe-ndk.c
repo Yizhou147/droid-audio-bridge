@@ -172,6 +172,36 @@ int main(int argc, char** argv) {
           }
         }
       }
+      if (getenv("ARGS2")) {
+        /* 09-25 反汇编设备自带 core-V2 的 OpenOutputStreamArguments::readFromParcel 得到的权威服务端布局：
+         *   [size][i32 A][pres][SourceMetadata][pres][AudioOffloadInfo?][i64][IStreamCallback][IStreamOutEventCallback]
+         * 其中 SourceMetadata 的 presence 若为 0 → 服务端直接 return 0x80000008（= 我们之前的 -2147483640）。
+         * SourceMetadata::readFromParcel 自身 = [size][ParcelableArray head]，head=0 即空数组。 */
+        AParcel* in2;
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        int (*wI64)(AParcel*, int64_t) = (void*)dlsym(N.h, "AParcel_writeInt64");
+        static const int32_t cand[] = {0, 1, 2, 23, 53};
+        for (unsigned k = 0; k < sizeof cand / sizeof *cand; k++) {
+          AParcel* out2 = NULL; in2 = NULL;
+          if (N.Prepare(b, &in2) != 0) { printf("ARGS2 prepare 失败\n"); break; }
+          wI32(in2, 0);            /* exception 位 */
+          wI32(in2, 40);           /* 参数块总字节（含本字段） */
+          wI32(in2, cand[k]);      /* 字段 A：语义待定，逐个试 */
+          wI32(in2, 1);            /* SourceMetadata presence（非 0 才不 EX_MARSHAL） */
+          wI32(in2, 8);            /* SourceMetadata size */
+          wI32(in2, 0);            /* 数组 head = null */
+          wI32(in2, 0);            /* AudioOffloadInfo presence = 无 */
+          if (wI64) wI64(in2, 0); else { wI32(in2, 0); wI32(in2, 0); }
+          wI32(in2, 0);            /* IStreamCallback null */
+          wI32(in2, 0);            /* IStreamOutEventCallback null */
+          int st2 = N.Transact(b, 15, &in2, &out2, 0);
+          int32_t ex2 = -1, h2 = -1;
+          if (out2) { N.Parcel_readInt32(out2, &ex2); N.Parcel_readInt32(out2, &h2); }
+          printf("ARGS2 A=%d st=%d ex=%d first=%#x %s\n", cand[k], st2, ex2, (unsigned)h2,
+                 (st2 == 0 && ex2 == 0) ? "VERDICT-M1: unmarshal 过了，看 first" : "");
+          fflush(stdout);
+        }
+      }
       if (0) {
         /* 不搬 blob（read 侧无导出）——照 dumpsys 明文手搓 AudioConfig：
            port=AudioPortConfig{id:53 portId:23 rate:48000 STEREO S16 out flags:0 device:speaker}
