@@ -112,3 +112,21 @@ client 写环、HAL 自取；binder 上只有 `writeAvBrokenHwModule...HackAidl.
    若也是空壳，坐实"SM 对 NDK 路过滤"，改走 1；
 3. M1 = openOutputStream(15)：参数 = 从 getAudioPorts 回包**原样搬运**的 AudioPort/AudioConfig 字节
    （service call 拿 hex → 我们回写同款字节），全程免逆结构。
+
+
+## 8. 【09-25 深夜 ★M0 正式闭环】audio-probe-ndk 全通
+
+`su -c /data/local/tmp/audio-probe-ndk` → prepare st=0 / transact(11) st=0 / exception=0 /
+reply=19164B（与 service call 金样字节数一致，52 端口 + speaker/bt_a2dp_speaker 等名字在包内）。
+
+**"空壳"公案定案**：NDK binder 规矩 = `AServiceManager_getService` 拿到的是**无 class 裸句柄**，
+不先 `AIBinder_Class_define(descriptor)+associateClass` 就 Prepare 必 `-38`（桥源码注释原话，
+第一轮就记下了却没执行到位）。`impl=0x0` 诊断线是按猜测偏移读 ABBinder 私有布局的**红鲱鱼**，
+布局本身没验证过——"用未验证的偏移下结论"和探针不自证是同一种病。
+
+**下一步 M1**（全零静音帧验证，禁外放）：
+1. 从 §8 的 19164B 回包里切出 speaker device-port 段（id=23, name="speaker",
+   profile 48k/S16_LE/2ch，dumpsys 已有对账），构造 openOutputStream(15) 的 AudioConfig：
+   **直接搬运回包字节**，不逆结构；
+2. IStreamOut 方法码表已就位（§2）；数据环 createMmapBuffer 的码用同一手法反汇编拿；
+3. ring 写入用零帧，判据=readBack 指针推进 + HAL 无错，不看耳朵。
