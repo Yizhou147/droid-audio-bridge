@@ -175,31 +175,55 @@ int main(int argc, char** argv) {
       if (getenv("ARGS2")) {
         /* 09-25 反汇编设备自带 core-V2 的 OpenOutputStreamArguments::readFromParcel 得到的权威服务端布局：
          *   [size][i32 A][pres][SourceMetadata][pres][AudioOffloadInfo?][i64][IStreamCallback][IStreamOutEventCallback]
-         * 其中 SourceMetadata 的 presence 若为 0 → 服务端直接 return 0x80000008（= 我们之前的 -2147483640）。
-         * SourceMetadata::readFromParcel 自身 = [size][ParcelableArray head]，head=0 即空数组。 */
+         * 每读一个字段前先查"已消费 >= size"，是则跳到末尾并返回 OK（⇒ size 可用来做信封自检）。
+         * SourceMetadata::readFromParcel = [size][AParcel_readParcelableArray]，数组 = [head][len][元素...]。
+         * 下面把 A / head / pres 组合扫一遍，看哪一个能过 unmarshal。 */
         AParcel* in2;
         int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
         int (*wI64)(AParcel*, int64_t) = (void*)dlsym(N.h, "AParcel_writeInt64");
-        static const int32_t cand[] = {0, 1, 2, 23, 53};
-        for (unsigned k = 0; k < sizeof cand / sizeof *cand; k++) {
+        struct var { int a, head, smPres, onlyEnv; };
+        static const struct var vs[] = {
+          {0, 1, 1, 0}, {1, 1, 1, 0}, {2, 1, 1, 0}, {53, 1, 1, 0},
+          {0, 0, 1, 0},                  /* 数组 head=0（上一轮已试，预期 EX_MARSHAL） */
+          {0, 1, 1, 1},                  /* 只发 [size=8][A]：验信封自检 */
+        };
+        for (unsigned k = 0; k < sizeof vs / sizeof *vs; k++) {
+          const struct var* v = &vs[k];
           AParcel* out2 = NULL; in2 = NULL;
           if (N.Prepare(b, &in2) != 0) { printf("ARGS2 prepare 失败\n"); break; }
-          wI32(in2, 0);            /* exception 位 */
-          wI32(in2, 40);           /* 参数块总字节（含本字段） */
-          wI32(in2, cand[k]);      /* 字段 A：语义待定，逐个试 */
-          wI32(in2, 1);            /* SourceMetadata presence（非 0 才不 EX_MARSHAL） */
-          wI32(in2, 8);            /* SourceMetadata size */
-          wI32(in2, 0);            /* 数组 head = null */
-          wI32(in2, 0);            /* AudioOffloadInfo presence = 无 */
-          if (wI64) wI64(in2, 0); else { wI32(in2, 0); wI32(in2, 0); }
-          wI32(in2, 0);            /* IStreamCallback null */
-          wI32(in2, 0);            /* IStreamOutEventCallback null */
+          wI32(in2, 0);                  /* exception 位 */
+          if (v->onlyEnv) {
+            wI32(in2, 8); wI32(in2, v->a);
+          } else {
+            int smBody = v->head ? 8 : 4;              /* [head][len] 或 [head=0] */
+            int smSize = 4 + smBody;                   /* + 自己的 size 字段 */
+            int total = 4 + 4 + 4 + smSize + 4 + 8 + 4 + 4;
+            wI32(in2, total);            /* 参数块总字节（含本字段） */
+            wI32(in2, v->a);             /* 字段 A */
+            wI32(in2, v->smPres);        /* SourceMetadata presence */
+            wI32(in2, smSize);           /* SourceMetadata size */
+            wI32(in2, v->head);          /* 数组 head */
+            if (v->head) wI32(in2, 0);   /* 数组 len = 0 */
+            wI32(in2, 0);                /* AudioOffloadInfo presence = 无 */
+            if (wI64) wI64(in2, 0); else { wI32(in2, 0); wI32(in2, 0); }
+            wI32(in2, 0);                /* IStreamCallback null */
+            wI32(in2, 0);                /* IStreamOutEventCallback null */
+          }
           int st2 = N.Transact(b, 15, &in2, &out2, 0);
           int32_t ex2 = -1, h2 = -1;
           if (out2) { N.Parcel_readInt32(out2, &ex2); N.Parcel_readInt32(out2, &h2); }
-          printf("ARGS2 A=%d st=%d ex=%d first=%#x %s\n", cand[k], st2, ex2, (unsigned)h2,
+          printf("ARGS2 A=%d head=%d pres=%d env=%d → st=%d ex=%d first=%#x %s\n",
+                 v->a, v->head, v->smPres, v->onlyEnv, st2, ex2, (unsigned)h2,
                  (st2 == 0 && ex2 == 0) ? "VERDICT-M1: unmarshal 过了，看 first" : "");
           fflush(stdout);
+          if (st2 == 0 && ex2 == 0 && out2) {
+            static uint8_t rb[4096]; int rl = 0;
+            if (parcel_spill(out2, rb, sizeof rb, &rl) == 0) {
+              printf("ARGS2 reply %d 字节：", rl);
+              for (int i = 0; i < rl && i < 96; i++) printf("%02x ", rb[i]);
+              printf("\n"); fflush(stdout);
+            }
+          }
         }
       }
       if (0) {

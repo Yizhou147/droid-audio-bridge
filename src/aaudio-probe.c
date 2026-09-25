@@ -15,7 +15,7 @@ typedef void AAudioStream;
 
 static struct {
   void* h;
-  AAudioStreamBuilder* (*create)(void);
+  AAudioStreamBuilder* (*create)(void** outSlot);
   void (*setDirection)(AAudioStreamBuilder*, int32_t);
   void (*setSampleRate)(AAudioStreamBuilder*, int32_t);
   void (*setChannelCount)(AAudioStreamBuilder*, int32_t);
@@ -93,7 +93,12 @@ int main(void) {
   const int shr = env("SHR", 0);              /* 0=SHARED */
   const int ms = env("MS", 800);
 
-  AAudioStreamBuilder* b = A.create();
+  /* 本设备的 AAudio_createStreamBuilder 走"隐藏 out 槽" flavored 实现（实测：写 [x0]，返回码在 w0）。
+   * 两种 ABI 形状都兜住：返回值非空就用返回值，否则用槽里的对象指针。 */
+  AAudioStreamBuilder* slot = NULL;
+  AAudioStreamBuilder* b = A.create((void**)&slot);
+  if (!b) b = slot;
+  printf("DIAG create=%p b=%p\n", (void*)A.create, (void*)b); fflush(stdout);
   if (!b) { fprintf(stderr, "createStreamBuilder null\n"); return 3; }
   A.setDirection(b, dir);
   A.setSampleRate(b, sr);
