@@ -17,6 +17,7 @@ typedef struct { char* ptr; size_t size; size_t cap_lsb1; } cxstring; /* std::st
 extern void* stub_call0(void* fn);
 extern void* stub_call1(void* fn, void* a0);
 extern void* stub_call2(void* fn, void* a0, void* a1);   /* 成员函数：x0=this, x1=arg, x8=sret */
+extern void* stub_call3(void* fn, void* a0, void* a1, void* a2);
 __asm__(
 ".text\n"
 ".globl stub_call0\n"
@@ -48,6 +49,19 @@ __asm__(
 "  mov x9, x0\n"
 "  mov x0, x1\n"
 "  mov x1, x2\n"
+"  blr x9\n"
+"  ldr x0, [sp, #16]\n"
+"  ldp x29, x30, [sp], #32\n"
+"  ret\n"
+".globl stub_call3\n"
+"stub_call3:\n"
+"  stp x29, x30, [sp, #-32]!\n"
+"  mov x29, sp\n"
+"  add x8, sp, #16\n"
+"  mov x9, x0\n"
+"  mov x0, x1\n"
+"  mov x1, x2\n"
+"  mov x2, x3\n"
 "  blr x9\n"
 "  ldr x0, [sp, #16]\n"
 "  ldp x29, x30, [sp], #32\n"
@@ -98,9 +112,8 @@ int main(int argc, char** argv) {
   char* heap = malloc(n + 1); memcpy(heap, svc, n + 1);
   cxstring s = { heap, n, ((n + 1) << 1) | 1 };     /* long 模式：cap 左移一位，最低位=1 */
   char slot[8] = {};
-  int32_t st = smGetService(sm, &s, (void**)slot);
-  void* binder = *(void**)slot;
-  if (st != 0 || !binder) { fprintf(stderr, "STEP3-FAIL getService st=%d binder=%p\n", st, binder); return 6; }
+  void* binder = stub_call3(smGetService, sm, &s, slot);   /* 值返回 sp：x8 槽；出错返回空 sp */
+  if (!binder) { fprintf(stderr, "STEP3-FAIL getService 空 sp（查 descriptor/SELinux）\n"); return 6; }
   printf("STEP3-OK binder=%p\n", binder); fflush(stdout);
 
   static char bufIn[256], bufOut[16384];
@@ -109,6 +122,7 @@ int main(int argc, char** argv) {
   snprintf(desc, sizeof desc, "%s", svc);
   char* slash = strrchr(desc, '/'); if (slash) *slash = 0;
   s16Ctor(tok, desc);
+  int32_t st;
   st = writeToken(bufIn, tok);
   if (st) { fprintf(stderr, "STEP4-FAIL writeInterfaceToken st=%d\n", st); return 7; }
   st = transact(binder, code, bufIn, bufOut, 0);
