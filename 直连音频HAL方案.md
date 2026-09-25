@@ -130,3 +130,18 @@ reply=19164B（与 service call 金样字节数一致，52 端口 + speaker/bt_a
    **直接搬运回包字节**，不逆结构；
 2. IStreamOut 方法码表已就位（§2）；数据环 createMmapBuffer 的码用同一手法反汇编拿；
 3. ring 写入用零帧，判据=readBack 指针推进 + HAL 无错，不看耳朵。
+
+
+## 9. 【09-25 深夜】M1b 战况与转场决策（r_submix 试验场）
+
+- 两次手搓 AudioConfig 试探均 `st=0x80000008(EX_TRANSACTION_FAILED)`——HAL 在 unmarshal 前部即拒，
+  **未建流未出声**（对用户 A2DP 视频流零扰动已验证；此前一次杂音系用户视频自身，误会解除）。
+- 取"标准 wire 序"的静态路线全部碰壁：`libaudioaidlcommon.so`/`android.hardware.audio.common-V3-ndk.so`
+  都只是薄桩（readFromParcel 在 NDK 后端=header inline，编进每个使用者体内）；
+  `libmedia.so` 亦无。=> 反汇编 HAL 体内联代码成本过高，弃。
+- **定案：M1 试验场转移到 `IModule/r_submix`**（虚拟混音模块：无硬件、无声、随便试错），
+  字段序在它身上试对之后原样移植 `default`。它的 AudioPort/AudioPortConfig 同型同序。
+- 附带情报：`android.hardware.audio.core-V2-ndk.so` 导出 52 个 `readFromParcel`，含
+  **StreamDescriptor/FMQ/AudioBuffer/Position/Reply/Command** 全套——M2 的 ring 协议直接 dlsym 这些
+  读回包（它们是真码不是 inline）。
+- 用户在看视频（A2DP 活跃）：今晚对 `default` 模块零试探；只读查询不限。
