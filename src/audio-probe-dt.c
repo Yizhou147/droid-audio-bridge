@@ -32,9 +32,8 @@ extern void* stub_call0(void* fn);
 __asm__(
 ".text\n.globl stub_dsm\nstub_dsm:\n"
 "  stp x29, x30, [sp, #-48]!\n"
-"  add x1, sp, #32\n"       /* dsm 的返回槽在 x1（+92 读 x1 写 x1）*/
+"  add x8, sp, #32\n"       /* 细读 dsm 全 prologue：x8=返回槽(输入)，构造完往 [x8] 写对象 */
 "  str xzr, [sp, #32]\n"
-"  mov x8, xzr\n"
 "  mov x9, x0\n"
 "  blr x9\n"
 "  ldr x1, [sp, #32]\n"
