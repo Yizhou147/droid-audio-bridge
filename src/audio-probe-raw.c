@@ -86,9 +86,9 @@ int main(int argc, char** argv) {
   printf("PS=%p\n", ps); fflush(stdout);
 
   char nullSp[8] = {};
-  void* ctxSp = stub_call2(getContextObject, ps, nullSp);  /* 成员：this=ps + const sp& ，值返回 sp */
+  void* ctxSp = stub_call2(getContextObject, ps, nullSp);  /* 值返回 sp<IBinder>：ctxSp=槽里的 binder 指针 */
   if (!ctxSp) { fprintf(stderr, "STEP1-FAIL getContextObject null\n"); return 4; }
-  void* sm = stub_call1(smAsInterface, ctxSp);           /* 返回 sp<IServiceManager>（值），首格即裸 ptr=sm 本体 */
+  void* sm = stub_call1(smAsInterface, &ctxSp);           /* 参数是 const sp<IBinder>& → 传槽地址，不是槽值 */
   if (!sm) { fprintf(stderr, "STEP2-FAIL asInterface null\n"); return 5; }
   printf("STEP1-2-OK ctx=%p sm=%p\n", ctxSp, sm); fflush(stdout);
 
