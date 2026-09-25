@@ -40,4 +40,8 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 # AAudio 捷径探针（纯 NDK 公共库，运行时 dlopen libaaudio）
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/aaudio-probe.c -o out/aaudio-probe
+
+# 桥本体：FIFO → AAudio
+"$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
+    src/aa-bridge.c -o out/aa-bridge
 ls -l out/
