@@ -62,14 +62,18 @@ static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
   static void* lb = 0;
   if (!lb) lb = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_GLOBAL);
   void* inner = *(void**)out;
-  const char* (*rdInpl)(const void*, size_t) = (const char*(*)(const void*, size_t))dlsym(lb, "_ZNK7android6Parcel10readInplaceEm");
   size_t (*dsize)(const void*) = (size_t(*)(const void*))dlsym(lb, "_ZNK7android6Parcel8dataSizeEv");
-  if (!inner || !rdInpl || !dsize) { printf("spill: inner=%p syms=%p/%p\n", inner, (void*)rdInpl, (void*)dsize); return -1; }
+  int (*setPos)(const void*, size_t) = (void*)dlsym(lb, "_ZN7android6Parcel11setDataPositionEm");
+  int (*rdI32)(const void*, int32_t*) = (void*)dlsym(lb, "_ZNK7android6Parcel9readInt32EPi");
+  if (!inner || !dsize || !setPos || !rdI32) { printf("spill: inner=%p %p/%p/%p\n", inner, (void*)dsize, (void*)setPos, (void*)rdI32); return -1; }
   int n = (int)dsize(inner);
-  if (n > cap) n = cap;
-  const char* data = rdInpl(inner, (size_t)n);
-  if (!data) return -2;
-  memcpy(buf, data, n);
+  if (n > cap - 4) n = cap - 4;
+  for (int i = 0; i + 4 <= n; i += 4) {
+    setPos(inner, i);
+    int32_t v;
+    if (rdI32(inner, &v)) { printf("spill: word %d blocked\n", i / 4); return -2; }
+    memcpy(buf + i, &v, 4);
+  }
   *lenOut = n;
   return 0;
 }
