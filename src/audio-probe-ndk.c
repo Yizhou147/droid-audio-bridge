@@ -59,33 +59,29 @@ static int find_speaker(const uint8_t* b, int len, int* hdr_off, int* size) {
  * 直接借内层 Parcel 的 readInplace/dataSize —— readByte 会在 binder 对象边界停，
  * 而回包里 object 之后还有我们要的 speaker 元素，必须整块拿。 */
 static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
-  static void* lb = 0;
-  if (!lb) lb = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_GLOBAL);
-  void* inner = *(void**)out;
-  size_t (*dsize)(const void*) = (size_t(*)(const void*))dlsym(lb, "_ZNK7android6Parcel8dataSizeEv");
-  int (*setPos)(const void*, int32_t) = (void*)dlsym(N.h, "AParcel_setDataPosition");   /* NDK 层（内层无导出） */
-  int (*rdI32)(const void*, int32_t*) = (void*)dlsym(lb, "_ZNK7android6Parcel9readInt32EPi");
-  if (!inner || !dsize || !setPos || !rdI32) { printf("spill: inner=%p %p/%p/%p\n", inner, (void*)dsize, (void*)setPos, (void*)rdI32); return -1; }
-  /* NDK setPos 作用于 AParcel 自己的游标=内层游标同一 Parcel，readInt32 走内层——两者共享 dataPos ✓ */
-  int n = (int)dsize(inner);
-  if (n > cap - 4) n = cap - 4;
-  int skips = 0;
-  for (int i = 0; i + 4 <= n; ) {
-    setPos(out, i);
-    int32_t v;
-    if (rdI32(inner, &v) == 0) { memcpy(buf + i, &v, 4); i += 4; continue; }
-    /* 对象边界：flat binder 占 16B 数据区，跳过后重试；连续跳不动 3 次即失败 */
-    if (buf[i] == 0 && skips++ > 64) return -3;
-    buf[i] = 0x40;  /* 记号，find_speaker 不依赖对象区 */
-    i += 16;
+  int (*setPos)(const void*, size_t) = (void*)dlsym(N.h, "AParcel_setDataPosition");
+  int (*rdByte)(const void*, int8_t*) = (void*)dlsym(N.h, "AParcel_readByte");
+  size_t (*dsize)(const void*) = (size_t(*)(const void*))N.Parcel_dataSize;
+  if (!setPos || !rdByte) { printf("spill: no pos/byte api\n"); return -1; }
+  int n = (int)dsize(out);
+  if (n > cap) n = cap;
+  int i = 0, stall = 0;
+  while (i < n) {
+    setPos(out, (size_t)i);
+    int8_t c;
+    if (rdByte(out, &c) == 0) { buf[i++] = (uint8_t)c; stall = 0; continue; }
+    /* 读不动：多半撞对象界 —— 步进 4 探路，连 16 步不动才算失败 */
+    stall++;
+    if (stall > 4 && i + 4 < n) { buf[i] = buf[i+1] = buf[i+2] = buf[i+3] = 0xEE; i += 4; stall = 0; continue; }
+    if (stall > 20) { printf("spill stuck @%d\n", i); return -2; }
   }
-  (void)skips;
   *lenOut = n;
   return 0;
 }
 
-static int find_speaker_elem(const uint8_t* b, int len, int* start, int* size) {
+static int find_elem_named(const uint8_t* b, int len, const char* want, int* start, int* size) {
   static const uint8_t pat[] = {'s',0,'p',0,'e',0,'a',0,'k',0,'e',0,'r',0,0,0};
+  (void)want;
   for (int t = 16; t + (int)sizeof pat < len; t++) {
     if (!memcmp(b + t, pat, sizeof pat)) {
       /* 回扫对象头：int32 size 紧跟 int32 ver==1，且元素区覆盖 t */
@@ -142,6 +138,41 @@ int main(int argc, char** argv) {
       printf("DIAG exception=%d header=%d size=%zu\n", ex, m, N.Parcel_dataSize(out));
       printf("VERDICT: %s\n", (ex == 0) ? "OK 链路全通" : "链路通但异常非0");
       if (getenv("OPEN_STREAM")) {
+        static uint8_t blob[65536]; int blen=0;
+        int src = parcel_spill(out, blob, sizeof blob, &blen);
+        int es=-1, esz=-1;
+        /* 扫第一个 ver=1 && 48<=size<=200 且含 "speaker"/name 的元素当模板 */
+        for (int o8 = 8; o8 + 8 <= blen; ) {
+          int32_t v2, s2; memcpy(&v2, blob+o8, 4); memcpy(&s2, blob+o8+4, 4);
+          if (v2 != 1 || s2 < 48 || s2 > 4096 || o8+s2 > blen) { printf("M1c walk bad @%d %d %d\n", o8, v2, s2); break; }
+          int fr = find_elem_named(blob, blen, "speaker", &es, &esz);
+          (void)fr;
+          es = o8; esz = s2;
+          break;  /* 模板=第一个元素（AudioPortConfig/或 port） */
+        }
+        if (src == 0 && esz > 0) {
+          printf("M1c template elem@%d size=%d (blen=%d)\n", es, esz, blen); fflush(stdout);
+          AParcel* in2 = NULL; AParcel* out2 = NULL;
+          int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+          int (*wByte)(AParcel*, int8_t) = (void*)dlsym(N.h, "AParcel_writeByte");
+          if (N.Prepare(b, &in2) == 0) {
+            wI32(in2, 0);
+            for (int i = 0; i < esz; i++) wByte(in2, (int8_t)blob[es + i]);   /* port=AudioPortConfig 原样 */
+            wI32(in2, 1); wI32(in2, 48000);      /* Int sampleRate */
+            wI32(in2, 1); wI32(in2, 1);           /* format{PCM} 粗试 */
+            wI32(in2, 0); wI32(in2, 0);           /* mode, flags */
+            int st2 = N.Transact(b, 15, &in2, &out2, 0);
+            printf("M1c openOutputStream st=%d\n", st2); fflush(stdout);
+            if (out2) {
+              int32_t ex2=-1, h2=-1;
+              N.Parcel_readInt32(out2,&ex2); N.Parcel_readInt32(out2,&h2);
+              printf("M1c reply ex=%d first=%#x %s\n", ex2, (unsigned)h2,
+                     (ex2==0 && h2==0x40) ? "VERDICT-M1: 流开成！" : "按码续修");
+            }
+          }
+        }
+      }
+      if (0) {
         /* 不搬 blob（read 侧无导出）——照 dumpsys 明文手搓 AudioConfig：
            port=AudioPortConfig{id:53 portId:23 rate:48000 STEREO S16 out flags:0 device:speaker}
            + rate{1,48000} + format{1,PCM=1,INT_16=1} + mode0 + flags0 。
