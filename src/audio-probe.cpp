@@ -28,12 +28,15 @@ static struct {
   size_t (*DataSize)(const AParcel*);
   void (*ParcelDelete)(AParcel*);
 } B;
+static void (*StartThreadPool)() = NULL;
 
 static int load(void) {
   void* h = dlopen("libbinder_ndk.so", RTLD_NOW);
   if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
 #define S(field, name) do { *(void**)&B.field = dlsym(h, name); \
     if (!B.field) { fprintf(stderr, "missing %s\n", name); return 1; } } while (0)
+  *(void**)&StartThreadPool = dlsym(h, "ABinderProcess_startThreadPool");
+  if (StartThreadPool) StartThreadPool();   // 关键：不启线程池，getService 返回无法挂 linkToDeath 的空壳(impl=NULL)
   S(GetService, "AServiceManager_getService");
   // waitForService 也拿一份做后备（getService 返回 null 时才用）
   *(void**)&B.WaitForService = dlsym(h, "AServiceManager_waitForService");
