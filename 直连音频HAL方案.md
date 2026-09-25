@@ -81,3 +81,34 @@ client 写环、HAL 自取；binder 上只有 `writeAvBrokenHwModule...HackAidl.
 - 本机 arm64 无 NDK ⇒ CI（GitHub Actions，runner 自带 NDK 优先，回落 sdkmanager，见 build.yml 注释史）。
 - 产物 `out/audio-probe` `adb push /data/local/tmp/`，`su -c` 跑；SELinux 同 bthci-bridge 已趟平（ksu 域可 transact hal 服务）。
 - 首次跑通判据：probe 能打出 ≥1 个 OUTPUT 角色端口 + 含 speaker 字样的 id（探针必须自带反例意识：全 0 先怀疑探针）。
+
+
+## 7. 【09-25 深夜】M0 达成 + 客户端形态的事实矩阵
+
+**M0 验收已达成（借 `service call` 完成）**：`service call android.hardware.audio.core.IModule/default 11`
+回 19164 字节、exception=0、UTF-16 端口名齐全（speaker / bt_a2dp_speaker / built_in_mic…），
+原始回包已归档 `docs/getAudioPorts-reply-0925.txt`。事务码 11/15 与 §2 表全部与实包对账。
+
+**取服务这条路，各形态在本机 ksu/root-shell 下的死活（全部今日实测）**：
+
+| 客户端形态 | 结果 |
+|---|---|
+| `service call`(C++ service 二进制, su 或 shell uid) | ✅ 查询/transact 都通 |
+| NDK `AServiceManager_getService(IModule/default)` | ❌ 返回 AIBinder 空壳（mImpl=0），`prepare=-38`；`associateClass` 补上(r=0)仍 -38 |
+| NDK 同一函数查 **IBluetoothHci**（蓝牙桥） | ✅ isRemote=1（**同一颗 NSI，audio 就是拿不到**） |
+| dlopen libbinder 的 C 探针（stub 齐：self/getContextObject/asInterface 全过） | ❌ BpServiceManager::getService 恒返回空 sp（shell uid 同） |
+| DT_NEEDED 链接 libbinder 的 C 探针 | ❌ 同上一步骤时崩（`defaultServiceManager` 里 sret 陷阱仍在）+ 空 sp |
+
+**已排除项**：SELinux 拒绝（无任何 avc，ksu 域 permissive）、服务名打错、descriptor 缺失、
+线程池未启、TLS/装载差异（shell uid 一样空）、`waitForService`（同样空壳）。
+**未排除的假说**（明晚从这里接）：MIUI servicemanager 对 `getService2`/`checkService2`（NDK 与裸 C++ 的新码）
+**按调用方域过滤/返回空**（A15 新事务，非 AOSP 原生行为；`service` 二进制与桥恰好都不走这条路：
+`service`=checkService 旧码，桥=目标 BT 服务在 vendor SM 上）。
+
+**明晚开工序列（判据都自带反例）**：
+1. C 探针换调 **checkService 的 LEGACY 事务码**（handle0 手拼 parcel：token `android.os.IServiceManager` +
+   String16 名；码表从 `service` 二进制反汇编拿真值，别猜）——如果这通，M1 直接基于自建 binder 客户端做；
+2. 或者：NDK 探针 `AServiceManager_getService("media.audio_policy")`（framework 原生服务）——
+   若也是空壳，坐实"SM 对 NDK 路过滤"，改走 1；
+3. M1 = openOutputStream(15)：参数 = 从 getAudioPorts 回包**原样搬运**的 AudioPort/AudioConfig 字节
+   （service call 拿 hex → 我们回写同款字节），全程免逆结构。
