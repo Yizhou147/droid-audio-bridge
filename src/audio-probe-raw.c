@@ -97,6 +97,11 @@ int main(int argc, char** argv) {
   void (*s16Ctor)(void*, const char*) = R(lu, "_ZN7android8String16C1EPKc");
   if (!ProcessState_self || !getContextObject || !smAsInterface || !smGetService || !transact) return 3;
 
+  if (argc > 3 && !strcmp(argv[3], "--dsm-first")) {
+    void* (*dsm)(void) = R(lb, "_ZN7android21defaultServiceManagerEv");
+    void* ref = dsm();                       /* 返回 const sp&：静态槽地址，无 sret */
+    printf("DIAG dsm-ref=%p obj=%p\n", ref, ref ? *(void**)ref : 0); fflush(stdout);
+  }
   void* ps = stub_call0(ProcessState_self);      /* 返回 sp<ProcessState>：值返回走 x8 槽 */
   if (!ps) { fprintf(stderr, "STEP0-FAIL ProcessState::self null（open /dev/binder 失败？）\n"); return 4; }
   printf("PS=%p\n", ps); fflush(stdout);
