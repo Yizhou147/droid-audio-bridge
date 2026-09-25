@@ -1,0 +1,60 @@
+name: build-audio-bridge
+
+permissions:
+  contents: read
+
+# 本机是 arm64 Linux 且没有 NDK → 交叉编译放云端（模式抄 droid-bluetooth-bridge，含其踩过的坑）。
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/**"
+      - "build.sh"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 定位或安装 NDK
+        run: |
+          set -uo pipefail
+          CC_REL="toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang++"
+          found=""
+          if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -x "$ANDROID_NDK_HOME/$CC_REL" ]; then
+            found="$ANDROID_NDK_HOME"
+          fi
+          if [ -z "$found" ]; then
+            for c in /usr/local/lib/android/sdk/ndk/* "$HOME/android-sdk/ndk"/*; do
+              if [ -x "$c/$CC_REL" ]; then found="$c"; break; fi
+            done
+          fi
+          if [ -z "$found" ]; then
+            echo "回落 sdkmanager 安装"
+            export ANDROID_HOME="$PWD/android-sdk"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            curl -fsSL -o ct.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q ct.zip -d "$ANDROID_HOME/cmdline-tools"
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            yes | "$SM" --licenses >/dev/null 2>&1 || true
+            for pkg in "ndk;r27.2.12479018" "ndk;27.0.12077973" "ndk;26.3.11579264"; do
+              if "$SM" "$pkg" >/dev/null 2>&1; then found="$ANDROID_HOME/ndk/${pkg#ndk;}"; break; fi
+            done
+          fi
+          [ -n "$found" ] || { echo "拿不到 NDK" >&2; exit 1; }
+          echo "ANDROID_NDK_HOME=$found" >> "$GITHUB_ENV"
+
+      - name: 编译
+        run: |
+          sh build.sh
+          head -c 20 out/audio-probe | od -c | head -2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-probe-aarch64
+          path: out/audio-probe
+          if-no-files-found: error
