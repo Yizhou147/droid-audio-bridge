@@ -63,20 +63,22 @@ int main(int argc, char** argv) {
   R(String16Ctor, lu, "_ZN7android8String16C1EPKc");
   R(String16Dtor, lu, "_ZN7android8String16D1Ev");
   R(WriteInterfaceToken, lb, "_ZN7android6Parcel19writeInterfaceTokenERKNS_8String16E");
-  R(GetDataSize, lb, "_ZNK7android6Parcel11getDataSizeEv");
+  R(GetDataSize, lb, "_ZNK7android6Parcel8dataSizeEv");
   if (!A.DefaultSM || !A.BpsmGetService || !A.BpTransact || !A.ParcelCtor || !A.ReadInt32) return 3;
 
   // 1) sm 单例
   void* smref = A.DefaultSM();               // sp<IServiceManager>& → 存的是裸指针
   void* sm = *(void**)smref;
   if (!sm) { fprintf(stderr, "STEP1-FAIL defaultServiceManager null\n"); return 4; }
+  printf("DIAG sm=%p vptr=%p\n", sm, *(void**)sm); fflush(stdout);
   // 2) getService（std::string 用与平台一致的 libc++；SSO 布局一致）
   auto name = new std::string(svc);
-  char binderSlot[16] = {};                  // sp<IBinder> = {m_ptr}，多留一格防 ABI 差
+  printf("DIAG pre-getService name=%s\n", svc); fflush(stdout);
+  char binderSlot[16] = {};  // sp<IBinder> 8B 本体+8B 余量
   status_t st = A.BpsmGetService(sm, name, (void**)binderSlot);
   void* binder = *(void**)binderSlot;
   if (st != 0 || !binder) { fprintf(stderr, "STEP2-FAIL getService st=%d binder=%p\n", st, binder); return 5; }
-  printf("STEP1-2-OK sm=%p binder=%p service=%s\n", sm, binder, svc);
+  printf("STEP1-2-OK sm=%p binder=%p service=%s\n", sm, binder, svc); fflush(stdout);
   A.IncStrong(binder, svc);                  // 持住引用（id 传什么都行，RefBase 忽略）
 
   // 3) 组 in parcel：interface token（descriptor '/' 前段）+ 无参方法只到 token
