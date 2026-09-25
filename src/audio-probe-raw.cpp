@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
   void* ps = ProcessState_self();
   printf("PS=%p\n", ps); fflush(stdout);
   char nullSp[8] = {};                        // sp<IBinder> = 单指针
-  void* ctxRef = getContextObject(ps, nullSp);
+  void* ctxRef = getContextObject(ps, nullSp);   // AAPCS64: this=x0=ps，x1=const sp&（空 sp=拿 context manager）
   if (!ctxRef) { fprintf(stderr, "STEP1-FAIL getContextObject null\n"); return 4; }
   void* smWrap = smAsInterface(ctxRef);       // sp<IServiceManager>；首格=裸指针
   if (!smWrap) { fprintf(stderr, "STEP2-FAIL asInterface null\n"); return 5; }

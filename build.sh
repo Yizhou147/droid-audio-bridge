@@ -22,8 +22,8 @@ CC="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang++"
 
 mkdir -p out
 "$CC" -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter \
-    -fPIE -pie -static-libstdc++ \
+    -fPIE -pie -static-libstdc++ -Wl,--exclude-libs,ALL \
     src/audio-probe.cpp -o out/audio-probe -llog
-"$CC" -std=c++17 -O2 -Wall -Wno-unused-parameter -fPIE -pie -static-libstdc++ \
+"$CC" -std=c++17 -O2 -Wall -Wno-unused-parameter -fPIE -pie -static-libstdc++ -Wl,--exclude-libs,ALL \
     src/audio-probe-raw.cpp -o out/audio-probe-raw -llog
 ls -l out/
