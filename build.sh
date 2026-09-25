@@ -36,4 +36,8 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 
 "$CC_C" -std=gnu11 -O2 -Wall -fPIE -pie \
     src/audio-probe-ndk.c -o out/audio-probe-ndk
+
+# AAudio 捷径探针（纯 NDK 公共库，运行时 dlopen libaaudio）
+"$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
+    src/aaudio-probe.c -o out/aaudio-probe
 ls -l out/
