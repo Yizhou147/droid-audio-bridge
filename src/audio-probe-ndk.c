@@ -63,7 +63,7 @@ static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
   if (!lb) lb = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_GLOBAL);
   void* inner = *(void**)out;
   size_t (*dsize)(const void*) = (size_t(*)(const void*))dlsym(lb, "_ZNK7android6Parcel8dataSizeEv");
-  int (*setPos)(const void*, size_t) = (void*)dlsym(lb, "_ZN7android6Parcel11setDataPositionEm");
+  int (*setPos)(const void*, size_t) = (void*)dlsym(lb, "_ZNK7android6Parcel11setDataPositionEm");
   int (*rdI32)(const void*, int32_t*) = (void*)dlsym(lb, "_ZNK7android6Parcel9readInt32EPi");
   if (!inner || !dsize || !setPos || !rdI32) { printf("spill: inner=%p %p/%p/%p\n", inner, (void*)dsize, (void*)setPos, (void*)rdI32); return -1; }
   int n = (int)dsize(inner);
@@ -136,35 +136,46 @@ int main(int argc, char** argv) {
       printf("DIAG exception=%d header=%d size=%zu\n", ex, m, N.Parcel_dataSize(out));
       printf("VERDICT: %s\n", (ex == 0) ? "OK 链路全通" : "链路通但异常非0");
       if (getenv("OPEN_STREAM")) {
-        int hoff = -1, hsz = 0;
-        static uint8_t blob[65536];
-        int blen = 0;
-        printf("M1b spill rc=%d len=%d\n", parcel_spill(out, blob, sizeof blob, &blen), blen);
-        if (blen > 0) {
-          int es = -1, esz = -1;
-          int fr = find_speaker_elem(blob, blen, &es, &esz);
-          printf("M1b find=%d elem@%d size=%d\n", fr, es, esz); fflush(stdout);
-          if (fr == 0) {
-            AParcel* in2 = NULL; AParcel* out2 = NULL;
-            int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
-            int (*wByte)(AParcel*, int8_t) = (void*)dlsym(N.h, "AParcel_writeByte");
-            if (N.Prepare(b, &in2) == 0) {
-              wI32(in2, 0);                                   /* AudioConfig.port 存在位+对象：先写对象裸字节 */
-              for (int i = 0; i < esz; i++) wByte(in2, (int8_t)blob[es + i]);
-              wI32(in2, 1); wI32(in2, 48000);                 /* Int{value=48000} */
-              wI32(in2, 1);                                   /* format 存在位 */
-              wI32(in2, 1); wI32(in2, 1);                     /* PCM + INT_16 */
-              wI32(in2, 0);                                   /* mode NORMAL */
-              wI32(in2, 0);                                   /* flags */
-              int st2 = N.Transact(b, 15, &in2, &out2, 0);
-              printf("M1b openOutputStream st=%d\n", st2); fflush(stdout);
-              if (out2) {
-                int32_t ex2 = -1; N.Parcel_readInt32(out2, &ex2);
-                int32_t obj = -1; N.Parcel_readInt32(out2, &obj);
-                printf("M1b reply ex=%d first=%#x %s\n", ex2, (unsigned)obj,
-                       (ex2 == 0 && obj == 0x40) ? "VERDICT-M1: 流已开成(flat binder obj)" : "看码定位缺字段");
-              }
-            }
+        /* 不搬 blob（read 侧无导出）——照 dumpsys 明文手搓 AudioConfig：
+           port=AudioPortConfig{id:53 portId:23 rate:48000 STEREO S16 out flags:0 device:speaker}
+           + rate{1,48000} + format{1,PCM=1,INT_16=1} + mode0 + flags0 。
+           对象头 [ver=1][size] 先按 196 占位，HAL 若校验 size 会报 EX_MARSHAL→再精修。 */
+        AParcel* in2 = NULL; AParcel* out2 = NULL;
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        int (*wStr16)(AParcel*, const void*) = (void*)dlsym(N.h, "AParcel_writeString");
+        if (N.Prepare(b, &in2) == 0) {
+          wI32(in2, 0);                 /* exception */
+          /* AudioPortConfig 对象 */
+          wI32(in2, 1);                 /* version */
+          int sizeSlot = 0; wI32(in2, 0x7f7f);  /* size 占位（AIDL 读端按 size 跳，字段自洽即可） */
+          (void)sizeSlot;
+          wI32(in2, 53);                /* id */
+          wI32(in2, 23);                /* portId */
+          wI32(in2, 1); wI32(in2, 48000);       /* Int sampleRate = 48000 */
+          wI32(in2, 1); wI32(in2, 0); wI32(in2, 3); /* ChannelLayoutMask = stereo(3) */
+          wI32(in2, 1);                                /* format 存在 */
+          wI32(in2, 1); wI32(in2, 1); wI32(in2, 0);   /* PCM, INT_16, encoding NONE */
+          wI32(in2, 0);                                /* gain null */
+          wI32(in2, 0); wI32(in2, 0);                  /* flags{input:0, output:0} */
+          /* ext: device 变体 tag=? 先按 AudioPortDeviceExt{device{type OUT_SPEAKER=2? dumpsys 对账},addr""} 的常见平铺 */
+          wI32(in2, 1);                 /* ext presence */
+          wI32(in2, 0x14000000);        /* 试探：device.type=OUT_SPEAKER(20<<24 打包占位) —— 失败就按异常码回修 */
+          wI32(in2, 0);                 /* connection null-ish */
+          wI32(in2, 0);                 /* address "" */
+          wI32(in2, 0);                 /* encodedFormats 空 vector */
+          wI32(in2, 0); wI32(in2, 0); wI32(in2, 0); /* encapsulationModes/types + flags */
+          /* AudioConfig 尾字段 */
+          wI32(in2, 1); wI32(in2, 48000);  /* Int{48000} */
+          wI32(in2, 0);                    /* audioMode NORMAL */
+          wI32(in2, 0);                    /* flags */
+          int st2 = N.Transact(b, 15, &in2, &out2, 0);
+          printf("M1b openOutputStream st=%d\n", st2); fflush(stdout);
+          if (out2) {
+            int32_t ex2 = -1, hdr2 = -1;
+            N.Parcel_readInt32(out2, &ex2);
+            N.Parcel_readInt32(out2, &hdr2);
+            printf("M1b reply ex=%d first=%#x %s\n", ex2, (unsigned)hdr2,
+                   (ex2 == 0 && hdr2 == 0x40) ? "VERDICT-M1: 流开成(flat binder)" : "按 ex 码修字段序");
           }
         }
       }
