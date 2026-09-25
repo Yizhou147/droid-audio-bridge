@@ -55,14 +55,21 @@ static int find_speaker(const uint8_t* b, int len, int* hdr_off, int* size) {
  * 3) openOutputStream(15) parcel = ex0 + 元素字节 + {rate 存在位=1, 48000, fmtType=1(PCM),
  *    pcm=1(INT_16), mode=0, flags=0}（AudioConfig 头部字段按常见顺序试探；失败就打印异常码）
  * 判据：reply exception==0 且头 4 字节是 flat binder 对象(0x40) = 流已开成。 */
+/* AParcel 内部就是 { android::Parcel* }（libbinder_ndk 结构公开约定）：
+ * 直接借内层 Parcel 的 readInplace/dataSize —— readByte 会在 binder 对象边界停，
+ * 而回包里 object 之后还有我们要的 speaker 元素，必须整块拿。 */
 static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
-  int (*setPos)(const void*, int32_t) = (void*)dlsym(N.h, "AParcel_setDataPosition");
-  int (*rdByte)(const void*, int8_t*) = (void*)dlsym(N.h, "AParcel_readByte");
-  size_t (*dsize)(const void*) = (size_t(*)(const void*))N.Parcel_dataSize;
-  int n = (int)dsize(out);
+  static void* lb = 0;
+  if (!lb) lb = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_GLOBAL);
+  void* inner = *(void**)out;
+  const char* (*rdInpl)(const void*, size_t) = (const char*(*)(const void*, size_t))dlsym(lb, "_ZNK7android6Parcel10readInplaceEm");
+  size_t (*dsize)(const void*) = (size_t(*)(const void*))dlsym(lb, "_ZNK7android6Parcel8dataSizeEv");
+  if (!inner || !rdInpl || !dsize) { printf("spill: inner=%p syms=%p/%p\n", inner, (void*)rdInpl, (void*)dsize); return -1; }
+  int n = (int)dsize(inner);
   if (n > cap) n = cap;
-  setPos(out, 0);
-  for (int i = 0; i < n; i++) { int8_t c; if (rdByte(out, &c)) { printf("spill stop at %d\n", i); return -2; } buf[i] = (uint8_t)c; }
+  const char* data = rdInpl(inner, (size_t)n);
+  if (!data) return -2;
+  memcpy(buf, data, n);
   *lenOut = n;
   return 0;
 }
