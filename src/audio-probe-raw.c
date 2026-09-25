@@ -11,6 +11,37 @@
 
 typedef struct { char* ptr; size_t size; size_t cap_lsb1; } cxstring; /* std::string, long 模式 */
 
+/* AAPCS64：按值返回 sp<T>（非平凡类型）走隐藏返回槽 x8。直接 (void*(*)()) 调这些函数
+ * 会让 x8=垃圾 → libbinder 往垃圾指针里写（09-25 的 self()+84 段错误真因）。
+ * 这两个 stub 负责垫好 x8 槽再转交结果。 */
+extern void* stub_call0(void* fn);
+extern void* stub_call1(void* fn, void* a0);
+__asm__(
+".text\n"
+".globl stub_call0\n"
+"stub_call0:\n"
+"  stp x29, x30, [sp, #-32]!\n"
+"  mov x29, sp\n"
+"  add x8, sp, #16\n"
+"  mov x9, x0\n"
+"  blr x9\n"
+"  ldr x0, [sp, #16]\n"
+"  ldp x29, x30, [sp], #32\n"
+"  ret\n"
+".globl stub_call1\n"
+"stub_call1:\n"
+"  stp x29, x30, [sp, #-32]!\n"
+"  mov x29, sp\n"
+"  add x8, sp, #16\n"
+"  mov x9, x0\n"
+"  mov x0, x1\n"
+"  blr x9\n"
+"  ldr x0, [sp, #16]\n"
+"  ldp x29, x30, [sp], #32\n"
+"  ret\n"
+".previous\n"
+);
+
 static void* R(void* h, const char* n) {
   void* p = dlsym(h, n);
   if (!p) fprintf(stderr, "missing %s\n", n);
@@ -37,17 +68,16 @@ int main(int argc, char** argv) {
   void (*s16Ctor)(void*, const char*) = R(lu, "_ZN7android8String16C1EPKc");
   if (!ProcessState_self || !getContextObject || !smAsInterface || !smGetService || !transact) return 3;
 
-  void* ps = ProcessState_self();
+  void* ps = stub_call0(ProcessState_self);      /* 返回 sp<ProcessState>：值返回走 x8 槽 */
   if (!ps) { fprintf(stderr, "STEP0-FAIL ProcessState::self null（open /dev/binder 失败？）\n"); return 4; }
   printf("PS=%p\n", ps); fflush(stdout);
 
   char nullSp[8] = {};
-  void* ctxRef = getContextObject(ps, nullSp);
-  if (!ctxRef) { fprintf(stderr, "STEP1-FAIL getContextObject null\n"); return 4; }
-  void* smWrap = smAsInterface(ctxRef);
-  if (!smWrap) { fprintf(stderr, "STEP2-FAIL asInterface null\n"); return 5; }
-  void* sm = *(void**)smWrap;
-  printf("STEP1-2-OK sm=%p\n", sm); fflush(stdout);
+  void* ctxSp = stub_call1(getContextObject, nullSp);   /* 返回 sp<IBinder>（值） */
+  if (!ctxSp) { fprintf(stderr, "STEP1-FAIL getContextObject null\n"); return 4; }
+  void* sm = stub_call1(smAsInterface, ctxSp);           /* 返回 sp<IServiceManager>（值），首格即裸 ptr=sm 本体 */
+  if (!sm) { fprintf(stderr, "STEP2-FAIL asInterface null\n"); return 5; }
+  printf("STEP1-2-OK ctx=%p sm=%p\n", ctxSp, sm); fflush(stdout);
 
   size_t n = strlen(svc);
   char* heap = malloc(n + 1); memcpy(heap, svc, n + 1);
