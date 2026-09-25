@@ -41,7 +41,11 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/aaudio-probe.c -o out/aaudio-probe
 
-# 桥本体：FIFO → AAudio
+# 桥本体：FIFO/环回TCP → AAudio
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/aa-bridge.c -o out/aa-bridge
+
+# 轮内 activity 服务桩（让 audioserver 走完 onFirstRef 的 waitForService("activity")）
+"$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
+    src/activity-stub.c -o out/activity-stub
 ls -l out/
