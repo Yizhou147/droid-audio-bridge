@@ -13,6 +13,8 @@
 typedef struct { const char* ptr; size_t size; size_t cap_lsb1; } cxs;  /* std::string 长模式 ABI */
 
 extern void* dsm_get(void) __asm__("_ZN7android21defaultServiceManagerEv");
+extern void* ps_self(void) __asm__("_ZN7android12ProcessState4selfEv");
+extern void* ps_ctxobj(void* self, const void* sp) __asm__("_ZN7android12ProcessState16getContextObjectERKNS_2spINS_7IBinderEEE");
 extern int32_t bpsm_getService(void* self, const cxs* name, void** out)
   __asm__("_ZN7android2os16BpServiceManager10getServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
 extern int32_t bpsm_checkService(void* self, const cxs* name, void** out)
@@ -45,6 +47,8 @@ int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
   uint32_t code = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 11;
 
+  void* ps = ps_self();                        /* 复刻 service 的顺序：先自举 ProcessState 再查 sm */
+  printf("DIAG ps=%p\n", ps); fflush(stdout);
   void* smRef = dsm_get();
   void* sm = smRef ? *(void**)smRef : NULL;
   printf("DIAG smRef=%p sm=%p\n", smRef, sm); fflush(stdout);
