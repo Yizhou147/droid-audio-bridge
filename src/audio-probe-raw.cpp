@@ -41,11 +41,8 @@ struct Api {
   size_t (*GetDataSize)(const Parcel*);
 } A;
 
-static void* resolve(void* h, const char* n) {
-  void* p = dlsym(h, n);
-  if (!p) { fprintf(stderr, "missing %s\n", n); }
-  return p;
-}
+#define R(field, lib, name) do { *(void**)&A.field = dlsym(lib, name); \
+  if (!A.field) fprintf(stderr, "missing %s\n", name); } while (0)
 
 int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
@@ -53,20 +50,20 @@ int main(int argc, char** argv) {
   lb = dlopen("libbinder.so", RTLD_NOW | RTLD_GLOBAL);
   lu = dlopen("libutils.so", RTLD_NOW | RTLD_GLOBAL);
   if (!lb || !lu) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
-  A.DefaultSM = resolve(lb, "_ZN7android21defaultServiceManagerEv");
-  A.BpsmGetService = resolve(lb, "_ZN7android2os16BpServiceManager10getServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
-  A.IncStrong = resolve(lb, "_ZNK7android7RefBase9incStrongEPKv");
-  A.DecStrong = resolve(lb, "_ZNK7android7RefBase10decStrongEPKv");
-  A.BpTransact = resolve(lb, "_ZN7android8BpBinder8transactEjRKNS_6ParcelEPS1_j");
-  A.ParcelCtor = resolve(lb, "_ZN7android6ParcelC1Ev");
-  A.ParcelDtor = resolve(lb, "_ZN7android6ParcelD1Ev");
-  A.WriteInt32 = resolve(lb, "_ZN7android6Parcel11writeInt32Ei");
-  A.WriteUint64 = resolve(lb, "_ZN7android6Parcel11writeUint64Em");
-  A.ReadInt32 = resolve(lb, "_ZNK7android6Parcel9readInt32EPi");
-  A.String16Ctor = resolve(lu, "_ZN7android8String16C1EPKc");
-  A.String16Dtor = resolve(lu, "_ZN7android8String16D1Ev");
-  A.WriteInterfaceToken = resolve(lb, "_ZN7android6Parcel19writeInterfaceTokenERKNS_8String16E");
-  A.GetDataSize = resolve(lb, "_ZNK7android6Parcel11getDataSizeEv");
+  R(DefaultSM, lb, "_ZN7android21defaultServiceManagerEv");
+  R(BpsmGetService, lb, "_ZN7android2os16BpServiceManager10getServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
+  R(IncStrong, lb, "_ZNK7android7RefBase9incStrongEPKv");
+  R(DecStrong, lb, "_ZNK7android7RefBase10decStrongEPKv");
+  R(BpTransact, lb, "_ZN7android8BpBinder8transactEjRKNS_6ParcelEPS1_j");
+  R(ParcelCtor, lb, "_ZN7android6ParcelC1Ev");
+  R(ParcelDtor, lb, "_ZN7android6ParcelD1Ev");
+  R(WriteInt32, lb, "_ZN7android6Parcel11writeInt32Ei");
+  R(WriteUint64, lb, "_ZN7android6Parcel11writeUint64Em");
+  R(ReadInt32, lb, "_ZNK7android6Parcel9readInt32EPi");
+  R(String16Ctor, lu, "_ZN7android8String16C1EPKc");
+  R(String16Dtor, lu, "_ZN7android8String16D1Ev");
+  R(WriteInterfaceToken, lb, "_ZN7android6Parcel19writeInterfaceTokenERKNS_8String16E");
+  R(GetDataSize, lb, "_ZNK7android6Parcel11getDataSizeEv");
   if (!A.DefaultSM || !A.BpsmGetService || !A.BpTransact || !A.ParcelCtor || !A.ReadInt32) return 3;
 
   // 1) sm 单例
