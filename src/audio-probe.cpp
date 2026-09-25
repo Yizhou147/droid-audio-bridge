@@ -31,7 +31,8 @@ static struct {
 static void (*StartThreadPool)() = NULL;
 
 static int load(void) {
-  void* h = dlopen("libbinder_ndk.so", RTLD_NOW);
+  // 必须绝对路径：/data 二进制的默认命名空间会把裸名解析到 /vendor 那份（它走 vndbinder，framework 服务查成空壳 impl=NULL）
+  void* h = dlopen("/system/lib64/libbinder_ndk.so", RTLD_NOW);
   if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
 #define S(field, name) do { *(void**)&B.field = dlsym(h, name); \
     if (!B.field) { fprintf(stderr, "missing %s\n", name); return 1; } } while (0)

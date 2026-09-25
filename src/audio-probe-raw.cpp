@@ -47,8 +47,8 @@ struct Api {
 int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
   uint32_t code = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 11;
-  lb = dlopen("libbinder.so", RTLD_NOW | RTLD_GLOBAL);
-  lu = dlopen("libutils.so", RTLD_NOW | RTLD_GLOBAL);
+  lb = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_GLOBAL);
+  lu = dlopen("/system/lib64/libutils.so", RTLD_NOW | RTLD_GLOBAL);
   if (!lb || !lu) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
   R(DefaultSM, lb, "_ZN7android21defaultServiceManagerEv");
   R(BpsmGetService, lb, "_ZN7android2os16BpServiceManager10getServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
