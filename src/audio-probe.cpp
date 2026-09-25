@@ -4,6 +4,7 @@
 // 任何一步失败都要打明哪一步，不许把"没读到"报成"没有"。
 // 用法：su -c '/data/local/tmp/audio-probe [service]'
 #include <dlfcn.h>
+#include <string>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +55,56 @@ static int load(void) {
   return 0;
 }
 
+// ---- C++ 兜底：ProcessState::self → getContextObject → asInterface → getService(std::string) → transact ----
+static int raw_fallback(const char* svc, uint32_t code) {
+  void* lb = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_GLOBAL);
+  void* lu = dlopen("/system/lib64/libutils.so", RTLD_NOW | RTLD_GLOBAL);
+  if (!lb || !lu) { fprintf(stderr, "F-STEP0 dlopen %s\n", dlerror()); return 20; }
+  auto sym=[&](void* h, const char* n){ void* p=dlsym(h,n); if(!p) fprintf(stderr,"F missing %s\n",n); return p; };
+  typedef int32_t st_t;
+  auto selfFn = (void*(*)())sym(lb, "_ZN7android12ProcessState4selfEv");
+  auto getCtx = (void*(*)(void*, const void*))sym(lb, "_ZN7android12ProcessState16getContextObjectERKNS_2spINS_7IBinderEEE");
+  auto asIfc  = (void*(*)(const void*))sym(lb, "_ZN7android2os15IServiceManager11asInterfaceERKNS_2spINS_7IBinderEEE");
+  auto getService = (st_t(*)(void*, const std::string*, void**))sym(lb, "_ZN7android2os16BpServiceManager10getServiceERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEPNS_2spINS_7IBinderEEE");
+  auto transact = (st_t(*)(void*, uint32_t, const void*, void*, uint32_t))sym(lb, "_ZN7android8BpBinder8transactEjRKNS_6ParcelEPS1_j");
+  auto pCtor = (void(*)(void*))sym(lb, "_ZN7android6ParcelC1Ev");
+  auto wTok  = (st_t(*)(void*, const void*))sym(lb, "_ZN7android6Parcel19writeInterfaceTokenERKNS_8String16E");
+  auto rI32  = (st_t(*)(const void*, int32_t*))sym(lb, "_ZNK7android6Parcel9readInt32EPi");
+  auto dSize = (size_t(*)(const void*))sym(lb, "_ZNK7android6Parcel8dataSizeEv");
+  auto s16C  = (void(*)(void*, const char*))sym(lu, "_ZN7android8String16C1EPKc");
+  void* ps = selfFn();
+  printf("F PS=%p\n", ps); fflush(stdout);
+  if (!ps) return 21;
+  char nullSp[8] = {};
+  void* ctx = getCtx(ps, nullSp);
+  if (!ctx) { fprintf(stderr, "F-STEP1 getContextObject null\n"); return 22; }
+  void* smWrap = asIfc(ctx);
+  if (!smWrap || !*(void**)smWrap) { fprintf(stderr, "F-STEP2 asInterface null\n"); return 23; }
+  void* sm = *(void**)smWrap;
+  std::string name(svc);
+  char slot[8] = {};
+  st_t st = getService(sm, &name, (void**)slot);
+  void* binder = *(void**)slot;
+  printf("F-STEP3 getService st=%d binder=%p\n", st, binder); fflush(stdout);
+  if (st != 0 || !binder) return 24;
+  static char bufIn[256], bufOut[16384];
+  pCtor(bufIn); pCtor(bufOut);
+  char tok[16] = {}; char desc[128];
+  snprintf(desc, sizeof desc, "%s", svc);
+  char* slash = strrchr(desc, '/'); if (slash) *slash = 0;
+  s16C(tok, desc);
+  st = wTok(bufIn, tok);
+  if (st) { fprintf(stderr, "F-STEP4 writeToken st=%d\n", st); return 25; }
+  st = transact(binder, code, bufIn, bufOut, 0);
+  printf("F-STEP5 transact(0x%x) st=%d size=%zu\n", code, st, dSize(bufOut));
+  if (st == 0) {
+    int32_t ex=-1, n=-1;
+    rI32(bufOut, &ex); rI32(bufOut, &n);
+    printf("F-STEP6 exception=%d header=%d  %s\n", ex, n, (ex==0&&n>0)?"VERDICT-OK: 链路通":"VERDICT-PARTIAL: 布局待核");
+  }
+  return st == 0 ? 0 : 26;
+}
+
 int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
   const uint32_t code = 11;  // getAudioPorts
@@ -70,7 +121,10 @@ int main(int argc, char** argv) {
   printf("DIAG mod=%p vptr=%p impl=%p\n", (void*)mod, vptr, (void*)impl);
   AParcel* in = NULL;
   binder_status_t rc = B.Prepare(mod, &in);
-  if (rc != 0) { fprintf(stderr, "STEP2-FAIL prepare rc=%d (impl 为空 ⇒ getService 给了壳，改走 service-manager-raw)\n", rc); return 4; }
+  if (rc != 0) {
+    fprintf(stderr, "STEP2-FAIL prepare rc=%d ⇒ 转 C++ 兜底路（本进程 libbinder 已被 NDK 拉热，直接用它的导出符号）\n", rc);
+    return raw_fallback(svc, code);
+  }
   AParcel* out = NULL;
   rc = B.Transact(mod, code, &in, &out, 0);
   if (rc != 0 || !out) { fprintf(stderr, "STEP3-FAIL transact(11) rc=%d out=%p\n", rc, (void*)out); return 5; }
