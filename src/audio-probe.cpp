@@ -59,9 +59,14 @@ int main(int argc, char** argv) {
   if (!mod && B.WaitForService) mod = B.WaitForService(svc);
   if (!mod) { fprintf(stderr, "STEP1-FAIL getService(%s)：SELinux 或 servicemanager 挡了\n", svc); return 3; }
   printf("STEP1-OK service found: %s\n", svc);
+  // 诊断：AIBinder(ABBinder) 布局 [0]=vptr [8]=sp<IBinder> mImpl。
+  // 反汇编证明 prepare 的 -38 分支条件就是 mImpl==NULL，打印实况定位是谁造的空壳。
+  void* vptr = *(void**)mod;
+  void* impl = *(void**)((char*)mod + 8);
+  printf("DIAG mod=%p vptr=%p impl=%p\n", (void*)mod, vptr, (void*)impl);
   AParcel* in = NULL;
   binder_status_t rc = B.Prepare(mod, &in);
-  if (rc != 0) { fprintf(stderr, "STEP2-FAIL prepare rc=%d\n", rc); return 4; }
+  if (rc != 0) { fprintf(stderr, "STEP2-FAIL prepare rc=%d (impl 为空 ⇒ getService 给了壳，改走 service-manager-raw)\n", rc); return 4; }
   AParcel* out = NULL;
   rc = B.Transact(mod, code, &in, &out, 0);
   if (rc != 0 || !out) { fprintf(stderr, "STEP3-FAIL transact(11) rc=%d out=%p\n", rc, (void*)out); return 5; }
