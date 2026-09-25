@@ -140,7 +140,17 @@ int main(int argc, char** argv) {
   void* vptr = *(void**)mod;
   void* impl = *(void**)((char*)mod + 8);
   printf("DIAG mod=%p vptr=%p impl=%p\n", (void*)mod, vptr, (void*)impl);
-  if (argc > 2) { assoc_experiment(mod, argv[2]); }
+  /* 桥的定式：Class_define(descriptor)+associateClass 之后再 Prepare（缺这步必 -38） */
+  {
+    void* hh = dlopen("/system/lib64/libbinder_ndk.so", RTLD_NOW);
+    auto cdef = (void*(*)(const char*, void*, void*, void*))dlsym(hh, "AIBinder_Class_define");
+    auto assoc = (int(*)(AIBinder*, void*))dlsym(hh, "AIBinder_associateClass");
+    char desc[128]; snprintf(desc, sizeof desc, "%s", svc);
+    char* sl = strrchr(desc, '/'); if (sl) *sl = 0;
+    void* cls = cdef(desc, nullptr, nullptr, nullptr);
+    int ar = assoc(mod, cls);
+    printf("DIAG associate(%s) r=%d\n", desc, ar); fflush(stdout);
+  }
   AParcel* in = NULL;
   binder_status_t rc = B.Prepare(mod, &in);
   if (rc != 0) {
