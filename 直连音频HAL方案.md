@@ -226,6 +226,14 @@ DONE fed=284456 framesWritten=284456 xrun=0
 284456 帧 / 6 s ≈ 47.4k 帧/s ⇒ **实时率正确、零 xrun、桥+TCP+PipeWire 三方都不掉帧**。
 胶水脚本：`bin/aa-feeder.sh`（容器侧，自动挑默认 sink、断线重连）。
 
+### 10.2d ★真出声已确认（09-26 00:10，用户口述"有声音"）
+
+前置取证：`dumpsys media.audio_flinger` 显示音乐输出线程 `Output devices: 0x2 (AUDIO_DEVICE_OUT_SPEAKER)`
+⇒ 确认会走板载喇叭而非任何耳机（当时 A2DP 无活动设备），放音前才跟用户约的时间。
+实放：容器 `pw-play /tmp/beep.wav`（默认 sink 音量先降到 0.15）→ monitor → `nc` → `aa-bridge PORT=44777`
+→ AAudio：**用户听到声音**，桥侧 `framesWritten` 与 fed 同步推进、`xrun=0`。
+用完已把音量复原 0.95 / 解除 mute，设备上无残留进程。
+
 ### 10.3 待验（需要用户点头才能做的那一步）
 
 - 接管轮里 Android 被 `stop`（class core 全停），届时 `start audioserver` 能否干净起来 =
