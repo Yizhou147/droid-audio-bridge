@@ -61,8 +61,8 @@ static int parcel_spill(void* out, uint8_t* buf, int cap, int* lenOut) {
   size_t (*dsize)(const void*) = (size_t(*)(const void*))N.Parcel_dataSize;
   int n = (int)dsize(out);
   if (n > cap) n = cap;
-  if (!setPos(out, 0)) return -1;
-  for (int i = 0; i < n; i++) { int8_t c; if (rdByte(out, &c)) return -2; buf[i] = (uint8_t)c; }
+  setPos(out, 0);
+  for (int i = 0; i < n; i++) { int8_t c; if (rdByte(out, &c)) { printf("spill stop at %d\n", i); return -2; } buf[i] = (uint8_t)c; }
   *lenOut = n;
   return 0;
 }
@@ -128,8 +128,8 @@ int main(int argc, char** argv) {
         int hoff = -1, hsz = 0;
         static uint8_t blob[65536];
         int blen = 0;
-        if (parcel_spill(out, blob, sizeof blob, &blen)) { printf("M1b FAIL spill\n"); }
-        else {
+        printf("M1b spill rc=%d len=%d\n", parcel_spill(out, blob, sizeof blob, &blen), blen);
+        if (blen > 0) {
           int es = -1, esz = -1;
           int fr = find_speaker_elem(blob, blen, &es, &esz);
           printf("M1b find=%d elem@%d size=%d\n", fr, es, esz); fflush(stdout);
