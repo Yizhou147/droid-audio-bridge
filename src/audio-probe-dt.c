@@ -29,6 +29,16 @@ extern void s16_ctor(void*, const char*) __asm__("_ZN7android8String16C1EPKc"); 
 
 /* getService/checkService 实际按值返回 sp<IBinder>（x8=sret）：用 stub 拿槽里的指针。 */
 extern void* stub_call0(void* fn);
+__asm__(
+".text\n.globl stub_dsm\nstub_dsm:\n"
+"  stp x29, x30, [sp, #-48]!\n"
+"  add x8, sp, #32\n"
+"  str xzr, [sp, #32]\n"
+"  mov x9, x0\n"
+"  blr x9\n"
+"  ldr x1, [sp, #32]\n"
+"  ldp x29, x30, [sp], #48\n"
+"  ret\n.previous\n");
 extern void* stub_call3(void* fn, void* a0, void* a1, void* a2);
 __asm__(
 ".text\n.globl stub_call0\nstub_call0:\n  stp x29, x30, [sp, #-32]!\n  mov x29, sp\n  add x8, sp, #16\n  mov x9, x0\n  blr x9\n  ldr x0, [sp, #16]\n  ldp x29, x30, [sp], #32\n  ret\n.globl stub_call3\nstub_call3:\n"
@@ -48,10 +58,16 @@ int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/default";
   uint32_t code = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 11;
 
-  /* self()/dsm() 都是值返回 sp / 含 sret 的版本：一律 stub_call0 垫 x8 槽 */
+  /* 双路探针：x8 槽与 x0 直回一起抓，一次看清 dsm 的真实返回 ABI */
+struct pair { void* x0ret; void* slot; };
+extern struct pair stub_dsm(void* fn);
   void* ps = stub_call0((void*)ps_self);
   printf("DIAG ps=%p\n", ps); fflush(stdout);
-  void* smRef = dsm_get();   /* 若这行崩，改 stub_call0 再战 */
+  struct pair dp = stub_dsm((void*)dsm_get());
+  void* smRef = dp.x0ret;
+  void* smViaSlot = dp.slot ? *(void**)dp.slot : NULL;
+  printf("DIAG dsm: x0ret=%p slotval=%p->obj=%p\n", dp.x0ret, dp.slot, smViaSlot); fflush(stdout);
+  if (!smRef || (unsigned long)smRef < 0x1000) smRef = dp.slot;   /* 引用返回取 x0；值返回取槽 */
   void* sm = smRef ? *(void**)smRef : NULL;
   printf("DIAG smRef=%p sm=%p\n", smRef, sm); fflush(stdout);
   if (!sm) { fprintf(stderr, "STEP1-FAIL defaultServiceManager 空\n"); return 4; }
