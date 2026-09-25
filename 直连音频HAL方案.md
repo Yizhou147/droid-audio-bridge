@@ -62,6 +62,8 @@ client 写环、HAL 自取；binder 上只有 `writeAvBrokenHwModule...HackAidl.
   它不占任何独占硬件，HAL 本来就活着，冲突面=同一 module 的流位——交还安卓时 framework 复活会重建自己的流）。
 - **红线**：只 read 端口 + open 一条音乐流；不碰 IConfig.setAudioPorts、不调 setDevicesConnectionState、
   不发任何 `setParameters` 全局改动。
+- **禁外放（09-25 用户要求）**：开发期一切通路验证用**全零静音帧**灌 ring（链路真跑、喇叭不响）；
+  需要出声的验收必须先问用户要时间窗口。判据改用回包内容/流状态/HAL 日志，不用耳朵。
 - 与 anland 的关系：anland 态 audioserver 活着，安卓自己的 AudioService 也在——**桥在 anland 与轮内都物理可跑**，
   但 anland 态要不要它出声属产品决策（安卓 UI 没有音量控制它），默认只在轮内拉起。
 
