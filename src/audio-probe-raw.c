@@ -113,7 +113,19 @@ int main(int argc, char** argv) {
   cxstring s = { heap, n, ((n + 1) << 1) | 1 };     /* long 模式：cap 左移一位，最低位=1 */
   char slot[8] = {};
   void* binder = stub_call3(smGetService, sm, &s, slot);   /* 值返回 sp：x8 槽；出错返回空 sp */
-  if (!binder) { fprintf(stderr, "STEP3-FAIL getService 空 sp（查 descriptor/SELinux）\n"); return 6; }
+  printf("DIAG ours-getService binder=%p\n", binder); fflush(stdout);
+  { /* 对照组：`service` 二进制用的 defaultServiceManager() 对象（返回引用，无需 stub） */
+    void* (*defaultSM)(void) = R(lb, "_ZN7android21defaultServiceManagerEv");
+    if (defaultSM) {
+      void* smRef = defaultSM();                    /* const sp<IServiceManager>& = 静态槽地址 */
+      void* smObj = smRef ? *(void**)smRef : 0;
+      char slot2[8] = {};
+      void* b2 = stub_call3(smGetService, smObj, &s, slot2);
+      printf("DIAG defaultSM sm=%p binder=%p\n", smObj, b2); fflush(stdout);
+      if (b2 && !binder) binder = b2;               /* 对照组赢就用它 */
+    }
+  }
+  if (!binder) { fprintf(stderr, "STEP3-FAIL 两条 sm 路都拿不到 %s\n", svc); return 6; }
   printf("STEP3-OK binder=%p\n", binder); fflush(stdout);
 
   static char bufIn[256], bufOut[16384];
