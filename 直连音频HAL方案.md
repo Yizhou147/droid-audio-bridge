@@ -205,6 +205,27 @@ DONE fed=157604 framesWritten=157604 xrun=0
 即 **M1（开流）+ M2（数据面）在这条路上一起解决了**：不需要 createMmapBuffer 事务码、
 不需要 AudioRingBuffer 协议、不需要手搓 AudioConfig。剩下的是接线与真实音频试听。
 
+### 10.2c 传输层定案：环回 TCP（容器 rootfs 是 loop 镜像，FIFO 跨不过去）
+
+- 容器 `/` 是 `/dev/block/loop51` 的 ext4 镜像 ⇒ 两侧**看不到同一个路径**，FIFO 方案作废（保留为后备）。
+- 实测**容器与安卓共享 netns**：容器 `nc -l -p 44777` 能被安卓侧 `toybox nc 127.0.0.1 44777` 连上并收到数据
+  ⇒ 用环回 TCP，无需任何挂载或 SELinux 放行文件路径。
+- 容器侧默认 sink 就是 `#55 Anland remote speaker`（`wpctl status` 带 `*`），
+  `pw-cat -r -a --target=55 --format=s16 --rate=48000 --channels=2 -` 4 s 抓到 749568 B 且**全零**
+  （= monitor 可用，且当下无应用出声，安全）。
+- 全链路实测（桥 `PORT=44777` 监听 + 容器喂 monitor，约 6 s）：
+
+```
+STREAM sr=48000 ch=2 fmt=2 burst=3844 cap=7688 device=2
+SOURCE ready（喂零=静音）
+t=2016ms fed=96100 framesWritten=96100 xrun=0
+t=4021ms fed=192200 framesWritten=192200 xrun=0
+DONE fed=284456 framesWritten=284456 xrun=0
+```
+
+284456 帧 / 6 s ≈ 47.4k 帧/s ⇒ **实时率正确、零 xrun、桥+TCP+PipeWire 三方都不掉帧**。
+胶水脚本：`bin/aa-feeder.sh`（容器侧，自动挑默认 sink、断线重连）。
+
 ### 10.3 待验（需要用户点头才能做的那一步）
 
 - 接管轮里 Android 被 `stop`（class core 全停），届时 `start audioserver` 能否干净起来 =
