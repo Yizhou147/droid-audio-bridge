@@ -1303,3 +1303,24 @@ SINK t=… fed=368640 cons=368640 state=3(ACTIVE) lat=129 xrun=0 data 读=写 �
 把这根已验证的管子接进 `droid-drm-takeover`：desk-takeover 的 AUDIO_BRIDGE 块起 `halsink.sh` + 容器
 `aa-feeder.sh`；desk-stop/rollback 里 `pkill -x argsloop` 收尾、交还安卓时 `ctl.start audioserver`。
 真容器应用（`pw-play`/浏览器）出声复验。**红线**：绝不在当前接管轮还活着时重跑 takeover。
+
+
+## 34. 【09-26 19:2x M4：A 路接进 droid-drm-takeover（待真轮验证）】
+
+`droid-drm-takeover` 两个脚本本地提交（未 push，遵守"该仓库只本地 commit"）：
+- `desk-takeover.sh §2b`：`AUDIO_BRIDGE=1 AUDIO_ROUTE=a`（新默认）⇒ audioserver 保持停、
+  确认 vendor audio HAL 活 ⇒ `run` 起安卓侧 `/data/local/tmp/halsink.sh`（常驻 argsloop SINK :44777）。
+  旧 B′ 路（拉起 audioserver 给 AAudio）保留在 `AUDIO_ROUTE=b`。缺产物只 SKIP，**绝不 rollback**。
+- `desk-takeover.sh §5f`：桌面/PipeWire 起来后 `runuser -u xieyizhou` 起 `scripts/aa-feeder.sh` 推 monitor。
+- 交还/回滚/看门狗 三处都 `pkill -x argsloop`(安卓) + `pkill -f aa-feeder.sh`(容器)，让 audioserver 重启抢回 HAL。
+- `scripts/aa-feeder.sh` 从本仓库 bin/ 复制过来，使接管集成自包含。
+
+### 34.1 还差最后一步：真接管轮验证（需用户约时间）
+静态检查（bash -n、语法、路径）已过；**没跑真 takeover 轮**（红线：不在当前轮活着时重跑，且会出声）。
+用户在场时的验证剧本：
+1. 确认 `/data/local/tmp/{argsloop,halsink.sh,mix2.bin,dev23.bin,patch0.bin}` 都在（换机要重抓模板）。
+2. `AUDIO_BRIDGE=1 sh desk-takeover.sh` → 进轮后看：
+   - 安卓：`grep -a "SINK" /data/local/tmp/hal-sink.log`（应 监听 → feeder 已连 → `SINK t=… state=ACTIVE xrun=0`）。
+   - 容器：`tail $LOGD/hal-feeder.log`（应"抓 sink #N → 127.0.0.1:44777"）。
+3. 容器里放音频（`pw-play`/浏览器）→ 板载喇叭出声 = M4 成立。
+4. `sh desk-stop.sh` 交还 → 确认安卓侧 `pkill argsloop` 生效、框架音频恢复。
