@@ -34,9 +34,11 @@ __asm__(
 "  mov x1, x2\n"
 "  mov x2, x3\n"
 "  br  x5\n"
+".text\n.globl call_sret4\ncall_sret4:\n  mov x8, x5\n  mov x7, x0\n  mov x0, x1\n  mov x1, x2\n  mov x2, x3\n  mov x3, x4\n  br  x7\n"
 ".previous\n"
 );
 extern void call_sret3(void* fn, void* a0, void* a1, void* a2, void* sret);
+extern void call_sret4(void* fn, void* a0, void* a1, void* a2, void* a3, void* sret);
 
 /* 符号插桩：可执行文件导出的同名符号在全局作用域里优先，平台 Bp 码经 PLT 调 AIBinder_transact
  * 时会先进这里 ⇒ 转发给真实现，并在返回前把 reply parcel 抄下来（里面有 IStreamOut 与 FMQ 的 fd）。 */
@@ -680,7 +682,43 @@ int auto_build(void* h) {
         }
         if (found < 0) printf("  APC: 值扫描也没找到 portId=%d\n", want);
       }
-      if (found >= 0) {
+      /* ACP2：不碰 wire —— 直接给平台一个**清零**的 AudioPortConfig（只填 id=0 / portId），
+       * 让它自己打包发码 18。签名（从 core-V4 符号表读）：
+       *   setAudioPortConfig(const AudioPortConfig&, AudioPortConfig* 出参, bool updateExisting)
+       * 清零的 libc++ std::string = 空串、shared_ptr = null ⇒ 合法对象。
+       * 其余字段留给 HAL 按端口默认填，看它回显什么再决定要不要补。 */
+      void* sac = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule18"
+                    "setAudioPortConfigERKNS0_5media5audio6common15AudioPortConfigEPS8_b");
+      if (sac) {
+        static char cfg[512]; memset(cfg, 0, sizeof cfg);
+        static char res[512]; memset(res, 0, sizeof res);
+        static char st6[64]; memset(st6, 0, sizeof st6);
+        *(int32_t*)(cfg + 0) = 0;                      /* id = 0 ⇒ 新建 */
+        *(int32_t*)(cfg + 4) = want;                   /* portId */
+        g_capcode = 18; g_cfg_len = 0;
+        call_sret4(sac, bp, cfg, res, (void*)(uintptr_t)0, st6);
+        void* sv = *(void**)st6;
+        int (*gst6)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+        printf("  ACP2: setAudioPortConfig st=%d  回包抄到=%d 字节\n",
+               sv && gst6 ? gst6(sv) : -999, g_cfg_len);
+        printf("  ACP2: 出参头 8 个 int32:");
+        for (int t = 0; t < 8; t++) printf(" %d", *(int*)(res + 4*t));
+        printf("\n  ACP2: 回包头 8 个 int32:");
+        for (int t = 0; t < 8 && 4*t < g_cfg_len; t++) printf(" %d", *(int*)(g_cfg + 4*t));
+        printf("\n"); fflush(stdout);
+        int nid = -1;
+        if (g_cfg_len >= 20) nid = *(int*)(g_cfg + 12 + 4);      /* [ex][arrSize][count][size][id] */
+        if (nid <= 0) nid = *(int*)(res + 4);                    /* 或直接从出参读 */
+        if (nid > 0) {
+          printf("  ACP2: ★新 portConfigId = %d\n", nid); fflush(stdout);
+          N.Parcel_setPos(args, 8);
+          ((int(*)(AParcel*, int32_t))N.Parcel_writeInt32)(args, nid);
+          N.Parcel_setPos(args, 0);
+        }
+        g_capcode = 15;
+      } else printf("  ACP2: 缺 BpModule::setAudioPortConfig 符号\n");
+      if (found < 0) goto apc_done;
+      {
         int sz = *(int*)(g_cfg + found);
         static uint8_t elem[4096];
         memcpy(elem, g_cfg + found, (size_t)sz);
@@ -706,6 +744,7 @@ int auto_build(void* h) {
           }
         }
       }
+  apc_done:
       g_capcode = 15;
     }
   }
