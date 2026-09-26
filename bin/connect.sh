@@ -14,6 +14,7 @@ sleep 3
 echo "audioserver=$(getprop init.svc.audioserver)"
 logcat -c
 DBG=1 APC=1 APCPORT=2 LOAD=/data/local/tmp/mix2.bin LOAD2=/data/local/tmp/dev23.bin DEVPORT=23 \
+  ROT="${ROT:-1}" \
   TONE="${TONE:-}" AMP="${AMP:-}" ROUNDS="${ROUNDS:-}" SLEEPMS="${SLEEPMS:-}" \
   PP=1 LOADP=/data/local/tmp/patch0.bin PAUTO=1 SENDP=1 POKE=0:"$PIDF" \
   GOT=1 AUTO=1 TRANSACT=1 STREAM=1 SESSION=1 \

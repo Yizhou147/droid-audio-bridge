@@ -19,7 +19,11 @@ for f in mix2.bin dev23.bin patch0.bin; do
 done
 [ -x "$D/argsloop" ] || { echo "缺 $D/argsloop（CI 产物 push 上来）" >&2; exit 3; }
 echo "HAL sink 起：SINK=$PORT（等容器 feeder 连；Ctrl-C 收）"
-PIDF=0 SINK="$PORT" \
+# ROT：接管轮里没有 AudioFlinger 推 setGameParameters("rotation=90")，PAL 的 device
+# rotation 停在 0（竖屏），四声道分配退化成"上下成对"，右声道就听不到在右边。
+# 实测（09-26）：ROT=1 时同样信号是干净的左/右成对。值：0=竖 1=横90 2=180 3=270。
+ROT="${ROT:-1}"
+PIDF=0 SINK="$PORT" ROT="$ROT" \
   APC=1 APCPORT=2 LOAD="$D/mix2.bin" LOAD2="$D/dev23.bin" DEVPORT=23 \
   PP=1 LOADP="$D/patch0.bin" PAUTO=1 SENDP=1 POKE=0:0 \
   AUTO=1 TRANSACT=1 STREAM=1 GOT=1 \
