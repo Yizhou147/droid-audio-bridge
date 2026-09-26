@@ -256,6 +256,27 @@ int auto_build(void* h) {
   printf("READ st=%d struct前8int=", rr);
   for (int k = 0; k < 8; k++) { int32_t v; memcpy(&v, args + 4 * k, 4); printf("%d ", v); }
   printf("\n"); fflush(stdout);
+  /* 关键调试：把我手发的字节 vs 平台从"解出的结构体"再编码的字节 并排打出来，逐字节找差异 */
+  {
+    AParcel* q2 = N.Parcel_create();
+    int (*wArgs)(const void*, AParcel*) = (int (*)(const void*, AParcel*))dlsym(h,
+      "_ZNK4aidl7android8hardware5audio4core7IModule25OpenOutputStreamArguments13writeToParcelEP7AParcel");
+    if (wArgs) {
+      int w2 = wArgs(args, q2);
+      static uint8_t mine[4096], theirs[4096];
+      int lm = 0, lt = 0;
+      N.Parcel_setPos(p, 0); spill(p, mine, sizeof mine, &lm);
+      N.Parcel_setPos(q2, 0); spill(q2, theirs, sizeof theirs, &lt);
+      printf("MINE(%d) ", lm); for (int i = 0; i < lm; i++) printf("%02x", mine[i]); printf("\n");
+      printf("THEIRS(%d) st=%d ", lt, w2); for (int i = 0; i < lt; i++) printf("%02x", theirs[i]); printf("\n");
+      for (int i = 0; i < lm || i < lt; i++) {
+        uint8_t a = i < lm ? mine[i] : 0xff, b2 = i < lt ? theirs[i] : 0xff;
+        if (a != b2) printf("  首差@%d: mine=%02x theirs=%02x\n", i, a, b2);
+        if (a != b2) break;
+      }
+      fflush(stdout);
+    }
+  }
   if (!getenv("TRANSACT") || rr != 0) return rr == 0 ? 0 : 9;
 
   /* 用平台 BpModule 发这个"平台刚解出来"的结构体 ⇒ 打包完全由平台做，我们只负责喂对的字节 */
