@@ -285,3 +285,45 @@ DONE fed=284456 framesWritten=284456 xrun=0
 - **`test -r/-w` 不是设备可用性判据**：它走 `access(2)`，看不见 cgroup deny；判 GPU 节点必须**真 open**
   （`dd if=/dev/dri/renderD128 of=/dev/null bs=1 count=0`）。desk-takeover 里那条 `GPU-PERM` 探针
   因此历史上 FAIL 68 次也不可信，待改。本轮真 open 成功（节点 `crw-rw-rw- root:graphics`）。
+
+## 12. 【09-26 上午·静音推进】桩链把轮内 audioserver 救活了，AAudio 仍差一步；顺带修掉一个我自己的 ABI 错
+
+### 12.1 桩链进展（全程零帧，一声未出）
+
+`activity-stub` 支持 `STUB_NAME/STUB_DESC` 复用，轮内按 audioserver 的等待顺序**逐个补桩**：
+
+| 桩 | 解开的那道等待 |
+|---|---|
+| `activity` (`android.app.IActivityManager`) | `UidPolicy::registerSelf()` |
+| `sensor_privacy` (`android.hardware.ISensorPrivacyManager`) | `SensorPrivacyPolicy::registerSelf()`（同 `onFirstRef` 里下一行） |
+| `permission` (`android.permission.IPermissionControl`) | `AudioTrackImpl::getCallingPackageName()`（客户端侧，libbinder `PermissionController::getService` 在 sleep 重试） |
+
+结果：**audioserver 主线程跑完 `onFirstRef`，三个服务全部注册**且进程稳定不重启：
+
+```
+audioserver pid: 27017 -> 27017
+media.audio_flinger : Service media.audio_flinger: found
+media.aaudio        : Service media.aaudio: found
+media.audio_policy  : Service media.audio_policy: found
+```
+HAL 侧也在正常应答（`AHAL_Module_QTI getAAudioMixerBurstCount: returning 2` 等，default/usb/r_submix/bluetooth 四模块枚举齐全）。
+
+**还差的一步**：`aaudio-probe` 在轮内 `openStream` 仍失败 —— `APM=10(LOW_LATENCY)` 回
+`-881 AAUDIO_ERROR_NO_SERVICE`，`APM=0/30`（传统 AudioTrack 路径）回 `-898 AAUDIO_ERROR_ILLEGAL_ARGUMENT`。
+最大嫌疑＝**`permission` 桩的答案不够真**：`getPackagesForUid` 需要一个真包名（我们回空/补零 ⇒
+传统路径判"参数非法"，direct 路径判"无服务"）。⇒ 下一步：让 `permission` 桩对 `getPackagesForUid`
+回一个真 String16 数组（`EX_NONE | presence=1 | count=1 | len+UTF-16("com.android.shell")`），
+而不是通用补零。次优先嫌疑：轮内 `hwservicemanager` 起不来（`init.svc.hwservicemanager=stopped`，
+`ctl.start` 不生效），HIDL 侧查询全空。
+
+### 12.2 我自己探针的真 bug（已修，并要**重新核验 anland 那两次结论**）
+
+`AAudioStream_write` / `AAudioStream_getFramesWritten` 在本设备**返回 int32**（thunk 就一条
+`b AAudioStreamBuilder_getFormat` 后 `ret`，只填 w0），我却按 `int64_t` 声明 ⇒ 高 32 位是垃圾；
+另外 VERDICT 那行在 `A.close(st)` 之后还调 `A.written(st)`（用后读）。已提交修复（返回类型统一
+int32，本量级无损；去掉用后读）。
+
+**因此要如实修正 §10.2/§10.2b/§10.2c 的数字**："15.4 万帧""572756 帧/xrun=0" 这些计数的
+低 32 位可信、但报告值不可全信；而 **`openStream rc=0` 与"你确实听到了声音"这两条是真结论**
+（都在 open/write 正常返回的路径上）。⇒ 待办：拿修好的二进制在 anland 态**重跑一次**同一判据，
+把数字重新钉一遍。
