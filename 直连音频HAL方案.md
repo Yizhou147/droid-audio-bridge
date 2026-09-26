@@ -1363,3 +1363,30 @@ sink_properties=device.description=Droid_Speaker media.class=Audio/Sink` + 设�
 ### 36.1 待验证（下一轮，全程需用户点头才出声）
 自动起一轮：§5f feeder 建 droid_out → 托盘应出现"Droid_Speaker"且能拖音量 → 放一段真音频
 （`pw-play` 或浏览器）→ 耳朵确认①有②随托盘音量变。本轮（第 35 节那次）是手搓验证，脚本已固化。
+
+
+## 37. 【09-26 20:1x 半响问题（右喇叭没声）定位：不是我们的锅，是 AGM 扬声器"场景/2→4 映射"】
+
+L/R 诊断（toneL/toneR/beep 各放一次，用户听）：
+- 数据只在左声道 → **左下**响；只在右声道 → **左上**响；L=R → **左下+左上**响；**右下/右上始终不响**。
+⇒ 我们送进去的 2 声道被**按位置塞进 4-driver 设备的第 0、1 槽**（都在左侧），第 2、3 槽（右pair）拿不到数据。
+
+排除项：
+- 不是转换 bug：SINK 里 s16(L,R)→s32(L,R)、8 字节/帧，读写都对。
+- 不是声道数：deep_buffer/low_latency 端口对外**只有 LAYOUT_STEREO**（QUAD 只有 direct_pcm_out/compress 有），
+  框架平时放音也是立体声却能四喇叭响 ⇒ **框架那条 2ch 流触发了 AGM 的 2→4 上混/四功放使能，我们这条没触发**。
+
+线索（本项目已有）：`工作总结.md:807` —— 四喇叭 = **tl/tr/bl/br**，厂商用
+`mixer_paths_sun_mtp.xml` 的 `FSM_Scene/FSM_Volume`（tl=7/tr=9/bl=11/br=13，Vol 235）驱动；
+本轮 PAL 日志确实出现 `spkcal … channel[4]` / `populateCalKeyVector: Multi channel speaker` /
+两个 MFC 实例（Miid 16566/17233）/ hw_ep `ch 4`。⇒ 差异在**设备场景(custom key)/通道映射**，
+不是 buffer 形状。
+
+### 37.1 下一步（要框架参考，需退出接管轮一次）
+抓**框架自己在放音时**那条 speaker 流的 `pal_stream_open` / AGM customKey / FSM_Scene 实参，
+与我们这条 diff，差出来的那个 key/场景就是要在直连路径里补设的（多半是 `Module::setParameters`
+的 vendor 参数或某个 AGM 设备 customKey）。这需要正常安卓态放一段音 + 读 PAL 日志（会出声，先约）。
+
+### 37.2 现状与收尾
+本轮音频链仍在跑（左pair 有声、右pair 无声）。交还安卓走 desk-stop（会清 argsloop/feeder/droid_out、
+audioserver 复活）——**是否现在交还由用户决定**。
