@@ -556,3 +556,93 @@ id=64/65 not found
   钩子里 `转发 + 抄 reply` ⇒ 拿到 `IStreamOut` 句柄与 FMQ 的 fd。
 - 本轮结论不变且已实证：**id=63 能在接管轮内开成流**（`fd 74→77`，线程 +1，零采样＝无声；
   已两次重启 HAL 复现）。M2 只剩"从平台手里接过 reply"这一步。
+
+## 22. 【09-26 12:4x ★M2 闭环 + 数据通道现身】GOT 钩子打通，回包里就是三块 FMQ
+
+### 22.1 前几轮 "GOT 一个槽都扫不到" 的真因（一次诊断彻底解决）
+
+新诊断版把 bias、每段映射、槽现值和 `dladdr` 结果全打出来，结论：
+
+```
+[GOT] 段=4 bias=7aa12de000 槽=7aa1339400（+5b400）应含 real=0x7aa1427b88
+[GOT] 槽现值=0x5693642d40 是 AIBinder_transact（/data/local/tmp/argsloop）   ← 注意 fname
+[GOT] real 在 /system/lib64/libbinder_ndk.so（AIBinder_transact）
+```
+
+**core-V4-ndk.so 里 `AIBinder_transact` 的 GOT 槽装的不是 libbinder_ndk 的地址，而是我自己可执行文件
+`/data/local/tmp/argsloop` 里的一个 PLT 桩。** 起因：build.sh 给 argsloop 加了 `-Wl,--export-dynamic`，
+于是"我只 import 不定义"的这个符号，被链接器当成**由可执行文件提供的全局定义**（PLT 桩即定义），
+core-V4 的引用按全局作用域优先绑到了它身上。
+
+⇒ 一次性解释掉两条老结论：§21 的"插桩从来不触发"和"值扫描零命中"都不是路线错，
+而是**槽里根本没有我以为的那个值**。顺带说明：bionic 的 lazy-PLT 猜测（§21 结尾）是多余的，
+这库是 full-RELRO/BIND_NOW，槽在载入时就写好了。
+
+### 22.2 定位槽的静态依据（可复用于任何 .so）
+
+`objdump` 的 `@plt` 标签在这里**全部错位**（已知病：标签取最近的前置符号）。正确做法
+= 解 `.rela.plt` 拿"槽偏移→符号名"，再解 `.plt` 指令流拿"桩→槽"：
+
+| 事实 | 值 |
+|---|---|
+| `AIBinder_transact` 的 GOT 槽静态 vaddr | **0x5b400**（`.got.plt` 起 0x5b2f0） |
+| 该符号的 PLT 桩 | 0x55ed8（`adrp/ldr/add/br`，16B 一条，符号标签落在 adrp-8） |
+| 调用点 | `BpModule::openOutputStream+0xdc → bl 0x55ed8`；同函数 0x36f80 那条 `bl 0x55ea8` 是 **AIBinder_prepareTransaction**（objdump 标成 `AParcel_writeStrongBinder@plt+0x8`，错的） |
+
+槽地址 = 最小映射起点 + 0x5b400，`mprotect` 后写钩子，实测读回成功。
+
+### 22.3 钩子抓到权威回包（接管轮内，零采样＝无声）
+
+```
+[GOT] reply=533 字节 ex=0
+[PFD@168 = 9 -> /dev/ashmem254f0b20-… ]  [PFD@332 = 10 -> 同]  [PFD@492 = 11 -> 同]
+mmap 大小：fd9=4096  fd10=4096  fd11=16384      头部 48 字节当前全 0（还没人写读过）
+TRANSACT(平台自己解析) ScopedAStatus st=0，HAL fd 74→77
+```
+
+- 之前所有失败尝试的回包都只有 **13 字节**（ex+一个 int）；533 字节 = 真内容。
+- 判 fd 的权威办法不是"整数看着像 fd"（`hunt_fds` 那版全是假阳性：fd 1 就是本进程自己的日志文件），
+  而是**让 `AParcel_readParcelFileDescriptor` 逐位置试读** —— 只有对象表里那个位置真是 `TYPE_FD` 才会成。
+- **ashmem 的 `st_size` 恒为 0** ⇒ 大小只能 mmap 倍增试探（4096→8192 失败即定界）。
+
+### 22.4 IStreamOut / IStreamCommon 码表（从 Bp 类的 AIDL 声明序数出，别再猜）
+
+`IStreamOut`（**没有任何数据通道方法**）：1 getStreamCommon, 2 updateMetadata, 3 updateOffloadMetadata,
+4 getHwVolume, 5 setHwVolume, 6 getAudioDescriptionMixLevel, 7 setAudioDescriptionMixLevel,
+8 getDualMonoMode, 9 setDualMonoMode, 10 getRecommendedLatencyModes, 11 setLatencyMode,
+12 getPlaybackRateParameters, 13 setPlaybackRateParameters, 14 selectPresentation, (+getInterfaceVersion/Hash)。
+
+`IStreamCommon`：1 close, 2 prepareToClose, 3 updateHwAvSyncId, 4 getVendorParameters,
+5 setVendorParameters, 6 add, 7 remove, **8 createMmapBuffer**。
+实测对 8 发过去 **status=-74 UNKNOWN_TRANSACTION** ⇒ 本机 HAL 不支持 mmap 路线（数据通道就是上面那三块 FMQ）。
+
+（`BpStreamOut` 的 vtable 里 `getStreamCommon` 落在第 5 格，**vtable 序号 ≠ 事务码**，别拿它当码表。）
+
+### 22.5 M2a：句柄怎么拿（以及为什么之前 `maybe==NULL`）
+
+平台自己解析后的 `OpenOutputStreamReturn`（我给的 `ret` 缓冲）里：
+
+```
+RETSHEAP 0=0xb400007a…5b0*   ← vptr 解出来正是 _ZTVN4aidl…core11BpStreamOutE
+```
+
+- **`ret+0` 就是活的 `BpStreamOut` 对象** —— 之前三轮"结构里没有句柄"的判断是假的：
+  我的指针过滤器写的是 `< 2^48` 才算指针，而 scudo 的堆指针带顶层 tag（`0xb40000XXXXXXXXXX`），
+  **全被自己滤掉了**。改成"该地址在 `/proc/self/maps` 某条可读映射里（先去 tag）"才算数。
+- 句柄在对象里的位置**不能猜**：`obj+8` 是引用计数（`0xffffffffffffffff`），
+  实测 `AIBinder*` 在 **`obj+32`**（判据：它的 vptr 落在 `libbinder_ndk.so`）。`BpStreamCommon` 同样在 +32。
+- 拿它对 `IStreamOut` 发 **码 1 getStreamCommon → st=0，reply=32 字节** ⇒ 再取 `IStreamCommon` 句柄。
+  解析用**平台自己的 `BpStreamOut::getStreamCommon(shared_ptr*)`**（按值返回 `ScopedAStatus` ⇒ 走隐藏 x8），
+  比手解回包可靠：手解那条路（`IStreamCommon::readFromParcel` + 手工 `AIBinder_readStrongBinder`）
+  要么把进程打崩、要么静默失败（`AParcel_readStrongBinder` 在这两个位置都拿不到句柄，原因未追）。
+- SELinux：进程仍在 `u:r:shell:s0`（KernelSU 的 su 只给 uid 不给域），
+  而对 `IModule`、`IStreamOut`、`IStreamCommon` 的事务**都通了**；dmesg 里那条
+  `denied { call } shell→hal_audio_default` 是噪音（同域同期调用成功）。
+
+### 22.6 下一步（M3）
+
+回包里的三个 164B 块 = `StreamDescriptor` + FMQ 几何。core-V4 恰好导出
+`StreamDescriptor::{readFromParcel, AudioBuffer, Reply, Command, Position}` 全套解析符号 ⇒
+**继续用平台当解码器**：把 `op` 定位到各块起点调这些函数，拿到
+元素大小/保留计数/读写位置偏移，然后按 FMQ 协议写零帧，判据＝共享内存里的计数器推进 + HAL 无错。
+M3 之后才是 `aa-bridge` 换成"HAL sink"并接进 desk-takeover/desk-stop。
