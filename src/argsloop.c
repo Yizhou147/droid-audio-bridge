@@ -228,17 +228,20 @@ int auto_build(void* h) {
       int (*wb)(AParcel*, AIBinder*) = (int(*)(AParcel*, AIBinder*))dlsym(N.ndk, "AParcel_writeStrongBinder");
       if (wb) wb(p, NULL); else N.Parcel_writeInt32(p, 0);
       nbytes += 24;
-    } else if (!strcmp(tok, "L")) {
+    } else if (!strncmp(tok, "L", 1) && (tok[1] == 0 || tok[1] == ':')) {
       int (*w64)(AParcel*, int64_t) = (int(*)(AParcel*, int64_t))dlsym(N.ndk, "AParcel_writeInt64");
-      if (w64) w64(p, 0); else { N.Parcel_writeInt32(p, 0); N.Parcel_writeInt32(p, 0); }
-      nbytes += 8;
+      int64_t v = tok[1] == ':' ? (int64_t)strtoll(tok + 2, NULL, 0) : 0;
+      if (w64) w64(p, v); else { N.Parcel_writeInt32(p, (int32_t)v); N.Parcel_writeInt32(p, (int32_t)(v >> 32)); }
     } else if (!strncmp(tok, "H:", 2)) {
-      const char* hx = tok + 2;
-      for (const char* q = hx; q[0] && q[1]; q += 2) {
-        int v = (int)strtol((char[3]){q[0], q[1], 0}, NULL, 16);
-        int (*wby)(AParcel*, int8_t) = (int(*)(AParcel*, int8_t))dlsym(N.ndk, "AParcel_writeByte");
-        if (wby) wby(p, (int8_t)v);
-        nbytes++;
+      /* 按 int32 写：AParcel_writeByte 每字节要占 4 字节格（上次 120B 变 480B 就是这么来的） */
+      const char* q = tok + 2;
+      while (q[0]) {
+        char w[9] = {0};
+        int k = 0;
+        while (k < 8 && q[k]) { w[k] = q[k]; k++; }
+        if (k < 8) { while (k < 8) w[k++] = '0'; }   /* 尾部补零对齐到 4 字节 */
+        N.Parcel_writeInt32(p, (int32_t)strtoul(w, NULL, 16));
+        q += 8;
       }
     } else { N.Parcel_writeInt32(p, (int32_t)strtol(tok, NULL, 0)); nbytes += 4; }
   }
