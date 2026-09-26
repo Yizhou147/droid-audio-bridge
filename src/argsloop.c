@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     cnt++;
     if (!e || !*e) break;
   }
-  printf("IN: %d 个 int\n", cnt); fflush(stdout);
+  printf("IN: %d 个词\n", cnt); fflush(stdout);
 
   /* 2) 平台读端当裁判 */
   static char args[2048];
