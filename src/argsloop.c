@@ -1303,33 +1303,30 @@ int auto_build(void* h) {
     SEND_CMD(2, 0);                                   /* start */
     usleep(600000);
     TAKE_REPLY(rpy);
-    printf("  SESSION: start -> Reply{status=%d bytes=%d state=%d} hw.frames=%lld\n",
-           rpy[0], rpy[1], rpy[2], (long long)hwFrames); fflush(stdout);
-    SEND_CMD(3, 0);                                   /* burst：问能写多少 */
-    usleep(600000);
-    TAKE_REPLY(rpy);
-    int room = rpy[1];
-    printf("  SESSION: burst -> Reply{status=%d 可写=%d state=%d}\n", rpy[0], room, rpy[2]);
+    printf("  SESSION: start -> Reply{status=%d bytes=%d state=%d}\n", rpy[0], rpy[1], rpy[2]);
     fflush(stdout);
-    if (room > 0) {
-      memset(dq + 16, 0, (size_t)room > g_qsz[2] - 16 ? g_qsz[2] - 16 : (size_t)room);
-      *(uint64_t*)(dq + 8) += (uint64_t)room;         /* 数据指针按字节推进 */
+    /* 输出方向的正确用法：先把数据投进 dataMQ（环形位置 = 写指针 % 容量），
+     * 再发 burst(N) 告诉 HAL "刚写了 N 字节"；Reply.fmqByteCount = 它真消费的字节数。
+     * 载荷全零 ⇒ 全程静音。 */
+    for (int iter = 0; iter < 4; iter++) {
+      int chunk = 1920;                                /* 240 帧 × 8 字节 */
+      if ((uint64_t)chunk > dcap) chunk = (int)dcap;
+      uint64_t wp = *(uint64_t*)(dq + 8) % dcap;
+      size_t first = dcap - wp;                         /* 环形回绕 */
+      memset(dq + 16 + wp, 0, (size_t)chunk < first ? (size_t)chunk : first);
+      if ((size_t)chunk > first) memset(dq + 16, 0, (size_t)chunk - first);
+      *(uint64_t*)(dq + 8) += (uint64_t)chunk;
       *(uint32_t*)(dq + dflag) |= 2;
       syscall(SYS_futex, dq + dflag, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
-      printf("  SESSION: 往 dataMQ 投了 %d 字节（全零=静音），写指针 -> %llu\n", room,
-             (unsigned long long)*(uint64_t*)(dq + 8)); fflush(stdout);
+      SEND_CMD(3, chunk);                              /* burst(N) */
+      usleep(700000);
+      TAKE_REPLY(rpy);
+      printf("  SESSION 轮%d: 投 %d 字节 burst(%d) -> Reply{status=%d 消费=%d state=%d} "
+             "hw.frames=%lld data 读=%llu 写=%llu\n", iter, chunk, chunk, rpy[0], rpy[1],
+             rpy[2], (long long)hwFrames,
+             (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
+      fflush(stdout);
     }
-    usleep(1200000);
-    printf("  SESSION: dataMQ 读指针=%llu 写指针=%llu（读指针动起来=HAL 真的吃下了）\n",
-           (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
-    SEND_CMD(3, 0);                                   /* 再 burst：看 frames 推进 */
-    usleep(600000);
-    TAKE_REPLY(rpy);
-    printf("  SESSION: 再 burst -> Reply{status=%d 可写=%d state=%d} hw.frames=%lld\n",
-           rpy[0], rpy[1], rpy[2], (long long)hwFrames);
-    printf("  SESSION: q2 读指针=%llu 写指针=%llu\n",
-           (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
-    fflush(stdout);
 #undef SEND_CMD
 #undef TAKE_REPLY
   }
