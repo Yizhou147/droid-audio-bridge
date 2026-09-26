@@ -212,6 +212,32 @@ int main(int argc, char** argv) {
           fflush(stdout);
         }
       }
+      if (getenv("ARGS5")) {
+        /* 09-26 定案模型：请求 = [异常头=0][args: size][pres][SourceMetadata][pres][i64][cb][evcb]
+         * 之前多写的一个 int 被当成 SourceMetadata 的 presence=0 ⇒ 正好回读端那条 0x80000008；
+         * 而漏写异常头时 44!=0 ⇒ -22。两种错码各归其位 ⇒ 删掉那个 int。
+         * size 含自身：4+4+12+4+8+4+4 = 44（另扫 48 以防 SM 口径差一格）。 */
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        int (*wI64)(AParcel*, int64_t) = (void*)dlsym(N.h, "AParcel_writeInt64");
+        for (int v = 0; v < 2; v++) {
+          AParcel* in7 = NULL; AParcel* out7 = NULL;
+          if (N.Prepare(b, &in7) != 0) break;
+          wI32(in7, 0);                                     /* 异常头 EX_NONE */
+          wI32(in7, v ? 48 : 44);                           /* args size（含自身） */
+          wI32(in7, 1);                                     /* SourceMetadata presence */
+          wI32(in7, 12); wI32(in7, 1); wI32(in7, 0);         /* SM: size, 数组 head=1, len=0 */
+          wI32(in7, 0);                                     /* AudioOffloadInfo presence=0 */
+          if (wI64) wI64(in7, 0); else { wI32(in7, 0); wI32(in7, 0); }
+          wI32(in7, 0); wI32(in7, 0);                       /* cb / evcb 为 null */
+          int s7 = N.Transact(b, 15, &in7, &out7, 0);
+          int32_t e7 = -1, h7 = -1;
+          if (out7) { N.Parcel_readInt32(out7, &e7); N.Parcel_readInt32(out7, &h7); }
+          printf("ARGS5 v=%d(size=%d) st=%d ex=%d first=%#x reply=%zu %s\n", v, v?48:44, s7, e7,
+                 (unsigned)h7, (out7 && N.Parcel_dataSize) ? N.Parcel_dataSize(out7) : 0,
+                 (s7 == 0) ? "★事务通了！" : "");
+          fflush(stdout);
+        }
+      }
       if (getenv("ARGS4")) {
         /* 09-26 内联定案后重造：请求**不写异常头**（CAL9 实测：第一个 int 就是第一个参数的字段）。
          * 于是 Arguments 的读序＝[size][version][pres][SourceMetadata(size,head,len)][pres=0][i64][cb][evcb]
