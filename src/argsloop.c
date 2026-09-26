@@ -22,6 +22,15 @@
 #include <unistd.h>
 #include <time.h>
 #include <math.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+
+/* SINK 模式的收尾标志：SIGTERM/SIGINT ⇒ 退出投喂循环，主动关流再退。 */
+static volatile sig_atomic_t g_sink_run = 1;
+static void sink_on_term(int sig) { (void)sig; g_sink_run = 0; }
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -1659,6 +1668,118 @@ int auto_build(void* h) {
 #undef SEND_CMD
 #undef TAKE_REPLY
     dump_write_threads("SESSION末");   /* write_db 的累计 CPU：非 0 才说明真在搬数据 */
+  }
+
+  /* ===== SINK=<port>：常驻 HAL sink（M3）=====
+   * 在 127.0.0.1:<port> 监听，收容器 aa-feeder 推来的 s16/48k/立体声裸 PCM，转成
+   * HAL 要的 INT_32（每样本 <<16），连续投进 dataMQ + 每段一条 burst(N)。
+   * 复用 SESSION 里已跑通的一切：cq/rq/dq、SEND_CMD/TAKE_REPLY、单槽回包的一问一答。
+   * 欠载（feeder 断/慢）就投零保活（静音，绝不让 HAL 侧 writeBlocking 饿死）。
+   * 前提与 SESSION 相同：GOT/STREAM 已把三块 FMQ 映进 g_qmem。 */
+  if (flag("SINK") && g_nq >= 3) {
+    uint8_t* cq = (uint8_t*)g_qmem[0];
+    uint8_t* rq = (uint8_t*)g_qmem[1];
+    uint8_t* dq = (uint8_t*)g_qmem[2];
+    size_t dcap = getenv("SINKDCAP") ? (size_t)strtoul(getenv("SINKDCAP"), NULL, 0)
+                                     : (g_qsz[2] > 16408 ? 16384 : 0);
+    uint32_t dflag = (uint32_t)(16 + dcap);
+    if (dcap == 0) { printf("  SINK: dataMQ 容量算不出（g_qsz[2]=%zu），退出\n", g_qsz[2]); return 9; }
+#define SEND_CMD(TAG, PAY) do {                                            \
+      *(uint32_t*)(cq + 16) = (uint32_t)(TAG);                             \
+      *(uint32_t*)(cq + 20) = (uint32_t)(PAY);                             \
+      *(uint64_t*)(cq + 8) += 8;                                           \
+      *(uint32_t*)(cq + 24) |= 2;                                          \
+      syscall(SYS_futex, cq + 24, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);  \
+    } while (0)
+#define TAKE_REPLY(OUT) do {                                               \
+      (OUT)[0] = *(int32_t*)(rq + 16);                                     \
+      (OUT)[1] = *(int32_t*)(rq + 20);   /* fmqByteCount */                 \
+      (OUT)[2] = *(int32_t*)(rq + 64);   /* state */                        \
+      obsFrames = *(int64_t*)(rq + 24); hwFrames = *(int64_t*)(rq + 40);   \
+      latMs = *(int32_t*)(rq + 56); xrun = *(int32_t*)(rq + 60);           \
+      *(uint64_t*)(rq + 0) += 56;                                          \
+      *(uint32_t*)(rq + 72) |= 2;                                          \
+      syscall(SYS_futex, rq + 72, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);  \
+    } while (0)
+    int rpy[3]; int64_t hwFrames = 0, obsFrames = 0; int latMs = -1, xrun = -1;
+    int port = atoi(getenv("SINK"));
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1; setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK); sa.sin_port = htons((uint16_t)port);
+    if (bind(lfd, (struct sockaddr*)&sa, sizeof sa) || listen(lfd, 1)) {
+      printf("  SINK: bind/listen :%d 失败: %s\n", port, strerror(errno)); return 9;
+    }
+    signal(SIGTERM, sink_on_term); signal(SIGINT, sink_on_term);
+    printf("  SINK: 监听 127.0.0.1:%d，等容器 feeder 连接…\n", port); fflush(stdout);
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0) { printf("  SINK: accept 失败: %s\n", strerror(errno)); return 9; }
+    printf("  SINK: feeder 已连\n"); fflush(stdout);
+    int nod = 1; setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nod, sizeof nod);
+
+    SEND_CMD(2, 0);                                   /* start */
+    if (wait_rpy_ms(rq, 2000)) TAKE_REPLY(rpy);
+    printf("  SINK: start -> Reply{state=%d}\n", rpy[2]); fflush(stdout);
+
+    static uint8_t inbuf[8192]; int ilen = 0;          /* 攒 s16（含未消费的半帧） */
+    uint64_t fed = 0, cons = 0; int64_t tlast = nowms(); int rounds = 0;
+    while (g_sink_run) {
+      /* 1) 尽量把 socket 里的数据读进 inbuf（非阻塞式 select，200ms 一拍） */
+      fd_set rf; FD_ZERO(&rf); FD_SET(cfd, &rf);
+      struct timeval tv = { 0, 200000 };
+      int sr = select(cfd + 1, &rf, NULL, NULL, &tv);
+      if (sr > 0 && ilen < (int)sizeof inbuf) {
+        ssize_t n = read(cfd, inbuf + ilen, sizeof inbuf - (size_t)ilen);
+        if (n == 0) { printf("  SINK: feeder EOF（收流），退出\n"); break; }
+        if (n > 0) ilen += (int)n;
+      }
+      /* 2) 本轮投多少：受 dataMQ 剩余空间 & 单次上限约束（帧=8B 输出） */
+      uint64_t wp = *(uint64_t*)(dq + 8), rp = *(uint64_t*)(dq + 0);
+      uint64_t space = dcap - (wp - rp);              /* 还能安全写多少字节 */
+      size_t maxburst = dcap / 2; if (maxburst > 8192) maxburst = 8192;
+      uint64_t outB = space < maxburst ? space : maxburst;
+      outB -= outB % 8;
+      if (outB == 0) {                                /* 队列满：先收上一段回包再继续 */
+        if (wait_rpy_ms(rq, 20)) { TAKE_REPLY(rpy); if (rpy[1] > 0) cons += (uint64_t)rpy[1]; }
+        continue;
+      }
+      int nf = (int)(outB / 8);                       /* 输出帧数（= 输入 s16 立体声帧数） */
+      for (int k = 0; k < nf; k++) {
+        int32_t L = 0, R = 0;
+        if (ilen >= (int)(k + 1) * 4) {               /* inbuf 里有这一帧 ⇒ 转 s16→s32 */
+          int16_t sl, sr2; memcpy(&sl, inbuf + k * 4, 2); memcpy(&sr2, inbuf + k * 4 + 2, 2);
+          L = (int32_t)sl << 16; R = (int32_t)sr2 << 16;
+        }                                            /* 否则欠载：投零（静音保活） */
+        uint64_t off = (wp + (uint64_t)k * 8) % dcap;
+        memcpy(dq + 16 + off, &L, 4);
+        memcpy(dq + 16 + off + 4, &R, 4);
+      }
+      int consumedIn = ilen >= nf * 4 ? nf * 4 : ilen;   /* 缺的是欠载补零，不占 inbuf */
+      memmove(inbuf, inbuf + consumedIn, (size_t)(ilen - consumedIn));
+      ilen -= consumedIn;
+      fed += outB;
+      *(uint64_t*)(dq + 8) += outB;
+      *(uint32_t*)(dq + dflag) |= 2;
+      syscall(SYS_futex, dq + dflag, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
+      SEND_CMD(3, (int)outB);                          /* burst(字节) */
+      rounds++;
+      if (wait_rpy_ms(rq, 2000)) { TAKE_REPLY(rpy); if (rpy[1] > 0) cons += (uint64_t)rpy[1]; }
+      int64_t tn = nowms();
+      if (tn - tlast >= 1000) {
+        printf("  SINK t=%lldms fed=%llu cons=%llu state=%d lat=%d xrun=%d data 读=%llu 写=%llu 剩=%llu\n",
+               (long long)tn, (unsigned long long)fed, (unsigned long long)cons, rpy[2], latMs, xrun,
+               (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8),
+               (unsigned long long)(dcap - (*(uint64_t*)(dq + 8) - *(uint64_t*)(dq + 0))));
+        fflush(stdout); tlast = tn;
+      }
+    }
+    printf("  SINK: 退出，共 %d 轮 fed=%llu cons=%llu\n", rounds,
+           (unsigned long long)fed, (unsigned long long)cons); fflush(stdout);
+    if (cfd >= 0) close(cfd);
+    if (lfd >= 0) close(lfd);
+#undef SEND_CMD
+#undef TAKE_REPLY
+    return 0;
   }
 
   hunt_fds("Return(平台解析后的结构)", ret, 512);
