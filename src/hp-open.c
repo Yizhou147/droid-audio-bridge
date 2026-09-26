@@ -20,12 +20,12 @@ int main(int argc, char** argv) {
   void (*Proc_start)(void) = (void (*)(void))dlsym(ndk, "ABinderProcess_startThreadPool");
   AIBinder* (*SM_get)(const char*) = (AIBinder* (*)(const char*))dlsym(ndk, "AServiceManager_getService");
   void (*IncStrong)(AIBinder*) = (void (*)(AIBinder*))dlsym(ndk, "AIBinder_incStrong");
-  Proc_setMax && Proc_setMax(4);
+  if (Proc_setMax) Proc_setMax(4);
   if (Proc_start) Proc_start();
   if (!SM_get) { fprintf(stderr, "no getService\n"); return 3; }
   AIBinder* b = SM_get(svc);
   if (!b) { fprintf(stderr, "getService(%s) 空\n", svc); return 4; }
-  IncStrong && IncStrong(b);
+  if (IncStrong) IncStrong(b);
   printf("DIAG binder=%p svc=%s\n", (void*)b, svc); fflush(stdout);
 
   static const char* cores[] = {
