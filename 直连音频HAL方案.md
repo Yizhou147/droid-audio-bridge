@@ -1339,3 +1339,27 @@ SINK t=… fed=368640 cons=368640 state=3(ACTIVE) lat=129 xrun=0 data 读=写 �
 
 现状：接管轮仍活着，音频链在跑（argsloop 常驻 + feeder 在推）。交还给用户 `desk-stop.sh`
 （teardown 里已含 `pkill -x argsloop` + `pkill -f aa-feeder.sh`，audioserver 随 `start` 复活）。
+
+
+## 36. 【09-26 19:3x 原生音量体验：容器建 Pulse 可见的 droid_out 虚拟 sink】
+
+**为什么托盘没有音频设备**：`wpctl` 里只有 anland 的 filter-chain 原生 sink「虚拟输出#69」，
+`pactl list sinks` 只看到 **auto_null**（pipewire-pulse 在没有 Pulse sink 时的哑元）。
+⇒ 两重后果：① plasma-pa（走 Pulse）没有真实设备可列；② **凡走 Pulse 的应用（浏览器等）被塞进
+auto_null = 我们的 feeder（抓 #69 monitor）根本收不到 = 静音**。刚才 pw-play 能响是因为它走原生默认 sink。
+
+**解法（当场验证可行、可回滚）**：`pactl load-module module-null-sink sink_name=droid_out
+sink_properties=device.description=Droid_Speaker media.class=Audio/Sink` + 设为默认
+⇒ 它**同时**是 Pulse sink（pactl 看得到 → 托盘出设备、能调音量/静音）**和** PipeWire Audio/Sink
+（带 monitor，feeder 能抓）+ 成为默认（应用都往这儿走）。volume 拧的就是它 → 直接缩放我们转发的信号。
+
+**落地**：
+- `droid-audio-bridge/bin/aa-feeder.sh` 与 `droid-drm-takeover/scripts/aa-feeder.sh`（同源）改成：
+  起来先 unload 残留 module-null-sink → 建 droid_out → set-default → 抓它的 monitor → nc；
+  `trap INT TERM EXIT` 里 `pactl unload-module $MID`，交还时干净（不碰 anland 的 #69）。
+- `argsloop SINK`：feeder 断了不再退出（关连接→重新 accept→再 start，流保留）+ accept 加 SO_RCVTIMEO
+  让 SIGTERM 能打断。新二进制已构建、已 mv 到 /data/local/tmp/argsloop（供下一轮）。
+
+### 36.1 待验证（下一轮，全程需用户点头才出声）
+自动起一轮：§5f feeder 建 droid_out → 托盘应出现"Droid_Speaker"且能拖音量 → 放一段真音频
+（`pw-play` 或浏览器）→ 耳朵确认①有②随托盘音量变。本轮（第 35 节那次）是手搓验证，脚本已固化。
