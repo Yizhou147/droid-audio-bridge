@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
 #include <unistd.h>
@@ -159,6 +160,10 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
             if (m != MAP_FAILED) munmap(m, good);
             m = t; good = sz; sz *= 2;
           }
+          { /* grantor 的事件字在 16+extent 处（q2 是 +16400）⇒ 必须比"整数倍试探"再多映一页 */
+            void* m2 = mmap(NULL, good + 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (m2 != MAP_FAILED) { munmap(m, good); m = m2; good += 4096; }
+          }
           printf("  [GOT]   mmap 大小=%zu 地址=%p\n", good, m);
           qput(fd, m, good);
           if (m != MAP_FAILED) {
@@ -236,6 +241,65 @@ static void* find_binder_in(void* obj, const char* tag) {
   return NULL;
 }
 static int g_nrd;
+/* 裁判：HAL 进程里所有 write_* 工作线程的累计 CPU（jiffies）。
+ * 我们那条流的工作线程 CPU 从 0 开始涨 ⇒ 它真的消费了我们写的东西。 */
+static void dump_write_threads(const char* tag) {
+  DIR* d = opendir("/proc");
+  if (!d) return;
+  struct dirent* de;
+  while ((de = readdir(d))) {
+    if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+    char path[160];
+    snprintf(path, sizeof path, "/proc/%s/cmdline", de->d_name);
+    FILE* f = fopen(path, "rb");
+    if (!f) continue;
+    char cb[256] = {0};
+    int rn = (int)fread(cb, 1, sizeof cb - 1, f);
+    fclose(f);
+    if (rn <= 0 || !strstr(cb, "audiohalservice")) continue;
+    snprintf(path, sizeof path, "/proc/%s/task", de->d_name);
+    DIR* td = opendir(path);
+    if (!td) continue;
+    struct dirent* te;
+    while ((te = readdir(td))) {
+      char cp[192]; snprintf(cp, sizeof cp, "/proc/%s/task/%s/comm", de->d_name, te->d_name);
+      FILE* cf = fopen(cp, "r");
+      if (!cf) continue;
+      char comm[64] = {0};
+      if (fgets(comm, sizeof comm, cf)) {}
+      fclose(cf);
+      if (strncmp(comm, "write", 5)) continue;
+      char sp[192]; snprintf(sp, sizeof sp, "/proc/%s/task/%s/stat", de->d_name, te->d_name);
+      FILE* sf = fopen(sp, "r");
+      if (!sf) continue;
+      char buf[1024] = {0};
+      int sn = (int)fread(buf, 1, sizeof buf - 1, sf);
+      fclose(sf);
+      long cpu = 0;
+      char state = '?';
+      if (sn > 0) {
+        char* p2 = strrchr(buf, ')');
+        if (p2) {
+          char* w = p2 + 1;
+          for (int k = 0; k < 14 && w; k++) {
+            while (*w == ' ') w++;
+            char* nx = strchr(w, ' ');
+            if (nx) *nx = 0;
+            if (k == 0) state = *w;
+            if (k == 11 || k == 12) cpu += atol(w);
+            if (!nx) break;
+            w = nx + 1;
+          }
+        }
+      }
+      printf("  THR %s: tid=%s comm=%s state=%c cpu=%ld\n", tag, te->d_name, comm, state, cpu);
+    }
+    closedir(td);
+    break;
+  }
+  closedir(d);
+  fflush(stdout);
+}
 
 static int readable(void* p) {
   unsigned long v = (unsigned long)p & ((1UL << 48) - 1);   /* 去掉 scudo/MTE 的顶层 tag */
@@ -929,12 +993,18 @@ int auto_build(void* h) {
       uint8_t* b = (uint8_t*)g_qmem[q];
       if (wwid == 8) *(uint64_t*)(b + woff) = (uint64_t)wval; else *(uint32_t*)(b + woff) = (uint32_t)wval;
       printf("  写了 q%d +%d = %d (宽%d)\n", q, woff, wval, wwid);
+      if (getenv("THR")) dump_write_threads("前");
       if (getenv("FK")) {            /* AIDL FMQ 是 futex 通知的（AshmemFutex），只改计数器不叫醒对方 */
-        for (int t = 0; t < 64; t += 4)
+        size_t lim = getenv("WALL") ? g_qsz[q] : (size_t)64;
+        int nw = 0;
+        for (size_t t = 0; t + 4 <= lim; t += 4) {
           syscall(SYS_futex, (char*)g_qmem[q] + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
-        printf("  FK: 已对 q%d 头部 64 字节的每个字发 FUTEX_WAKE\n", q); fflush(stdout);
+          nw++;
+        }
+        printf("  FK: 对 q%d 的 %d 个字发了 FUTEX_WAKE\n", q, nw); fflush(stdout);
       }
       usleep((getenv("S") ? atoi(getenv("S")) : 1000) * 1000);
+      if (getenv("THR")) dump_write_threads("后");
       for (int i = 0; i < g_nq; i++) {
         uint8_t* b2 = (uint8_t*)g_qmem[i];
         printf("  后 q%d(fd %d) :", i, g_qfd[i]);
@@ -961,11 +1031,20 @@ int auto_build(void* h) {
            wo, (unsigned long long)wcnt, (unsigned long long)rcnt);
     for (int t = 16; t < 72; t += 4) printf(" %d:%d", t, *(int32_t*)(rq + t));
     printf("\n");
-    *(int32_t*)(cq + 16) = tag;                             /* union tag */
-    *(int32_t*)(cq + 20) = payload;                         /* Void ⇒ 0；burst 等用它 */
+    if (getenv("CSLOT")) {                                  /* 另一种槽布局：[消息长度][tag] */
+      *(int32_t*)(cq + 16) = 4;
+      *(int32_t*)(cq + 20) = tag;
+      printf("  CMD: 用 CSLOT 布局 [len=4][tag=%d]，计数器偏移待试\n", tag);
+    } else {
+      *(int32_t*)(cq + 16) = tag;                           /* union tag */
+      *(int32_t*)(cq + 20) = payload;                       /* Void ⇒ 0；burst 等用它 */
+    }
     *(uint64_t*)(cq + wo) = wcnt + 1;                       /* 生产者推进 */
     syscall(SYS_futex, cq + 24, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
     syscall(SYS_futex, cq + wo, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+    if (getenv("WALL"))
+      for (size_t t = 0; t + 4 <= g_qsz[0]; t += 4)
+        syscall(SYS_futex, cq + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
     printf("  CMD: 写了 tag=%d payload=%d，计数器 %llu -> %llu，并对事件字(+24)发 WAKE\n",
            tag, payload, (unsigned long long)wcnt, (unsigned long long)(wcnt + 1));
     usleep((getenv("S") ? atoi(getenv("S")) : 1500) * 1000);
