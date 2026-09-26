@@ -1491,3 +1491,100 @@ ROT=1 ROTONLY=1 … argsloop      # bin/halrot.sh <n>：只发调用不开流、
 接管轮里：① 日志确认我们开流时 `misound device rotation 1`；② `bin/pan-feed.sh` 喂
 只左/只右裸流（-22dBFS，16s 自停），确认右段真在右边。取证脚本 `bin/verify-rot-round.sh`
 （setsid 脱终端，写 `logs/rot-round.log`，因为进轮会把本会话的 pty 带走）。
+
+---
+
+## 39. 立体声（左/右分离）在接管轮里已跑通（09-26 22:5x 实测）
+
+### 39.1 端到端链路（当前生效形态）
+```
+容器应用 → Pulse sink droid_out(PipeWire null-sink, 托盘可见可调音量)
+        → aa-feeder.sh: pw-cat -r --target=<droid_out monitor> s16/48k/2ch
+        → TCP 127.0.0.1:44777
+        → 安卓侧 argsloop SINK（s16→int32 写进 dataMQ）
+        → vendor AIDL HAL deep_buffer_out → speaker（audioserver 保持 stopped）
+```
+开流前 argsloop 自己发 `IModule::updateScreenRotation(1)`（事务码 29），HAL 侧证据：
+`AHAL_Platform_QTI: updated screen rotation from DEG_0 to DEG_90`
++ `setAudioPatch: created [deep_buffer_out -> speaker]` + `SINK … state=3 xrun=0`。
+**用户耳朵判定：左右可以分开** ⇒ 旋转这一刀修完，立体声方向正确。
+
+### 39.2 这一轮踩到的两个运维坑（已修）
+- `lowl-tone.sh` 结尾无脑 `ctl.start audioserver` ⇒ 轮里框架复活、和我们抢同一 HAL 属主，
+  那次 low_latency 诊断的"刺耳/只左"结论**全部作废**（不是路由结论，是格式/属主被污染）。
+  现在按"进来前状态"恢复；`halsink.sh` 启动时若发现 audioserver 活着就停掉。
+- `desk-takeover` 的音频块是 `AUDIO_BRIDGE=1` 才跑（`/run/drm-round.conf` 或环境）。
+  本轮没设 ⇒ sink/feeder 全靠手搓。**是否把默认改成开，由用户定**（见 §40 待办）。
+
+### 39.3 还差的那一半：下半对功放（bl/br）不响
+- 现象（用户耳朵，ROT=1、deep_buffer、双声道同相）：**只有左上+右上响**，左下+右下静音；
+  只左→左上、只右→右上，所以是"4 个 TDM 槽只填了前 2 个"，不是电平、不是左右映射。
+- 已排除（全部实测，别再重复）：
+  * 电平（顶格音量也一样）；
+  * usecase（框架 media 也是 LOW_LATENCY_PLAYBACK，且我们 deep/lowlat 两条都试过）；
+  * AGM/PAL KV 逐字节相同：`SP_Dev_Map 0xbe000000=0x3`、`0xa4000000=0xf`、`0xd2000000=0x0`、
+    `DevicePP_Rx=Audio_MIPLAY`、backend `TDM-LPAIF-RX-SECONDARY`、`configure_hw_ep_media_config … ch 4`；
+  * ALSA 控件：`tinymix` 全量与框架空闲态 diff **一字不差**（`FSM_Scene=0/FSM_Volume=243/FSM_AMP_ON=On`），
+    框架也不写 `speaker-tl/tr/bl/br` 那些 path（XML 里 7/9/11/13 没人用）；
+  * `setVendorParameters` 的 `speaker_number`（default/top/bottom/tl-spk/tr-spk/bl-spk/br-spk，
+    配套 `set gain to 817:0db/785:-4db/721:-12db/55/49`）—— **框架日志里根本没出现这个 id**，
+    所以它不是框架用的那条路。
+- 唯一还活着的差异：**图 Instance** —— 我们 deep_buffer 拿到 `0xa1000000=0xa1000001`，
+  框架 media 是 `0xa100000e`。下半对大概率藏在"框架那条流挂的图/模块比我们的多"里。
+
+### 39.4 下一步（按顺序，别跳）
+1. **正常安卓态做一次干净的冷开流抓取**：`logcat -c` → 放音 → 抓那条流的
+   `mod tag/miid/mid` 全清单 + `print_graph_alias`/`GKV Alias` + `0xa1000000` 值，
+   和我们 `/tmp/our_graph.log` 那份 diff，多出来的模块就是要复刻的东西。
+   （手里的旧框架日志都是"图已被前一条流 prepare 过"的脏数据，比不出来。）
+2. 复刻手段按优先级：① 换 mix port 到框架那个 Instance（改 `mix2.bin` 的 portId/flags 再 SAVE 一份）；
+   ② `setVendorParameters` 代打（argsloop 的 `VP/VPNEW` 已能编出合法 `VendorParameter`，
+   线节 = `[objectSize][平台 AParcel_writeString 的 id][union 标签][载荷]`，
+   注意 `AParcel_create` 是**平台 parcel（UTF-16 串）**，手搓 UTF-8 会 BAD_TYPE=-2147483640）；
+   ③ 直接喂 4 声道（`direct_pcm_out` 支持 `LAYOUT_QUAD`，`[L,L,R,R]`）—— 最笨但一定能成。
+3. 每次出声前先约；诊断只用内部 TONE 或已知小幅度裸流（`bin/mkpan.py`/`bin/pan-feed.sh`）。
+
+### 39.5 待办清单（本轮收尾时状态）
+- [ ] 下半对功放（见 §39.4 步骤 1）。
+- [ ] `ROT` 目前硬编码 1（横屏）。桌面翻转时要跟着改：从容器读 output transform 再传值。
+- [ ] `desk-takeover` 的 `AUDIO_BRIDGE` 默认值要不要翻成"开"（等用户定）。
+- [ ] 交还安卓后复测：托盘设备可见、per-app 音量、`droid_out` 卸载干净。
+
+---
+
+## 40. 待办：接管轮里物理音量键无效（09-26 取证完毕，下次直接动手）
+
+### 40.1 现象与根因
+轮里按物理音量+/- 没有任何反应。根因：**`system_server` 在轮里是死的**（实测 `ps -A` 只剩
+`audiohalservice.qti`），平时是它读按键并转成音量事件；容器侧也**没有任何进程读那个节点**：
+- `/proc/bus/input/devices`：`gpio-keys` → **event0**；
+- 全容器扫描 `/proc/*/fd`：只有 `systemd-logind`(pid 83) 读 event1/2/4/5/6/7/10、`upowerd` 读 event4；
+  **event0 零读者**；
+- `kwin_wayland`(pid 31418) 的 fd 里 **一个 /dev 都没有** ⇒ 它的输入设备是 logind 通过
+  fd 传递给的它（libseat/logind 模式），所以 kwin 看不见 event0。
+
+### 40.2 注入路径已验证可用（这是好消息，省掉一半工作）
+KDE 快捷键本来就绑好了：`~/.config/kglobalshortcutsrc` 里
+`increase_volume=Volume Up` / `decrease_volume=Volume Down`（还有 `_small=Shift+Volume …`）。
+实测：`DISPLAY=:0 xdotool key XF86AudioRaiseVolume` → `droid_out` 音量 **40% → 49%**。
+⇒ **只要把物理按键变成一次 xdotool 注入，音量键就通了**，不用碰 Pulse/KDE 配置。
+
+### 40.3 按键怎么"看见"——两条路的实测结论
+- **A. 轮询 `/proc/interrupts`（零 evdev 风险，但不完整）**
+  * `volume_up`：IRQ 127 `spmi-gpio 5`，**一次按键约 20 个边沿**（按 3 下：36 → 96）。这条干净可用。
+  * `volume_down`：**没有专属中断行**。按 3 下音量- 时只有这些动：
+    `pmic_resin` 46→68、`adc-sdam0` 36698→36820（`xiaomi_tp`/`hs_uart_wakeup` 是背景噪音）。
+    ⇒ 音量- 很可能走 **ADC 按键**（小米常见），中断计数看不准，要做"单次按键 diff"才能定，
+    也可能根本得读 IIO/ADC 通道值。
+- **B. 读 `/dev/input/event0`（精确，约 10 行 python）**
+  轮里该节点零读者、安卓侧消费者已死 ⇒ 不存在抢读者；**但这是 09-22 断网强启事故的同类操作**
+  （那次是**触摸**节点被小米 toucheventcheck 检出额外读者）。event0 是按键节点，风险明显更低，未实测。
+  若走这条：只在轮内起、`desk-stop`/rollback 里立刻 kill、单实例。
+
+### 40.4 建议的落地顺序（下次）
+1. 先做 B 的最小版（`bin/volkeys.py`：读 event0，`KEY_VOLUMEUP(115)/VOLUMEDOWN(114)` 的 value==1
+   → `xdotool key XF86AudioRaiseVolume/XF86AudioLowerVolume`），一次按键就能验完，
+   同时**观察是否触发断网/异常**（有异常立刻 kill 并回退到 A）。
+2. 若 B 出问题 → 退回 A：`volume_up` 用 IRQ127 计数跳变；音量- 先做单次按键 diff 定位行/ADC 通道。
+3. 接线：`desk-takeover.sh` 起来后拉起、`kill_linux_stack`/`desk-stop.sh`/rollback 里杀掉
+   （和 `aa-feeder.sh` 同一处，注意别用 `pkill -f` 自匹配，按 pid 杀）。
