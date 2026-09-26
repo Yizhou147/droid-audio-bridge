@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -65,6 +66,21 @@ int AIBinder_transact(AIBinder* binder, uint32_t code, AParcel** in, AParcel** o
   return r;
 }
 
+
+static void noop_create(void* a) { (void)a; }
+static void noop_destroy(void* a) { (void)a; }
+static int32_t noop_transact(AIBinder* b, uint32_t c, const void* in, void* out) {
+  (void)b; (void)c; (void)in; (void)out; return 0;
+}
+
+static struct {
+  void* ndk;
+  AParcel* (*Parcel_create)(void);
+  size_t (*Parcel_dataSize)(const AParcel*);
+  int32_t (*Parcel_setPos)(AParcel*, int32_t);
+  int32_t (*Parcel_readByte)(const AParcel*, int8_t*);
+  int32_t (*Parcel_writeInt32)(AParcel*, int32_t);
+} N;
 
 /* ===== GOT 钩子：不依赖符号插桩（那条被 bionic 的 NEEDED 查找顺序废掉，见 §21）=====
  * 做法：在 core-V4-ndk.so 自己的映射里，搜出所有 8 字节槽 == 真 AIBinder_transact 地址的
@@ -123,20 +139,6 @@ static int install_got_hook(const char* modpath, void* real) {
   return 0;
 }
 
-static void noop_create(void* a) { (void)a; }
-static void noop_destroy(void* a) { (void)a; }
-static int32_t noop_transact(AIBinder* b, uint32_t c, const void* in, void* out) {
-  (void)b; (void)c; (void)in; (void)out; return 0;
-}
-
-static struct {
-  void* ndk;
-  AParcel* (*Parcel_create)(void);
-  size_t (*Parcel_dataSize)(const AParcel*);
-  int32_t (*Parcel_setPos)(AParcel*, int32_t);
-  int32_t (*Parcel_readByte)(const AParcel*, int8_t*);
-  int32_t (*Parcel_writeInt32)(AParcel*, int32_t);
-} N;
 
 static void spill(AParcel* p, uint8_t* buf, int cap, int* lenOut) {
   int n = (int)N.Parcel_dataSize(p), i = 0, stall = 0;
