@@ -1564,7 +1564,10 @@ int auto_build(void* h) {
     uint8_t* cq = (uint8_t*)g_qmem[0];
     uint8_t* rq = (uint8_t*)g_qmem[1];
     uint8_t* dq = (uint8_t*)g_qmem[2];
-    size_t dcap = g_qsz[2] > 16408 ? 16384 : 0;
+    /* dataMQ ring = mapping - one page(4096): deep_buffer 20480->16384, low_latency 16384->12288.
+     * 老写法 `>16408?16384:0` 对 low_latency 算出 0 -> 一轮都不投 = 假放音。 */
+    size_t dcap = getenv("SINKDCAP") ? (size_t)strtoul(getenv("SINKDCAP"), NULL, 0)
+                                     : (g_qsz[2] > 8192 ? g_qsz[2] - 4096 : 0);
     uint32_t dflag = (uint32_t)(16 + dcap);            /* data 队列的事件字偏移 */
 #define SEND_CMD(TAG, PAY) do {                                            \
       *(uint32_t*)(cq + 16) = (uint32_t)(TAG);                             \
@@ -1686,7 +1689,7 @@ int auto_build(void* h) {
     uint8_t* rq = (uint8_t*)g_qmem[1];
     uint8_t* dq = (uint8_t*)g_qmem[2];
     size_t dcap = getenv("SINKDCAP") ? (size_t)strtoul(getenv("SINKDCAP"), NULL, 0)
-                                     : (g_qsz[2] > 16408 ? 16384 : 0);
+                                     : (g_qsz[2] > 8192 ? g_qsz[2] - 4096 : 0);
     uint32_t dflag = (uint32_t)(16 + dcap);
     if (dcap == 0) { printf("  SINK: dataMQ 容量算不出（g_qsz[2]=%zu），退出\n", g_qsz[2]); return 9; }
 #define SEND_CMD(TAG, PAY) do {                                            \
