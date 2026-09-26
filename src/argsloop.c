@@ -676,6 +676,26 @@ int auto_build(void* h) {
       for (int t = 0; t < 32; t += 4) printf(" %d:%u", t, *(uint32_t*)(b + t));
       printf("\n");
     }
+    if (q < g_nq && getenv("AW") && !getenv("D")) {
+      /* 首包实验：元素 = AudioBuffer{u32 mSize; u32 mReserved} + 载荷（这里载荷全是 0 = 静音）。
+       * 元数据按 [u32 writePos][u32 readPos] 在 +0/+4 的假设写。 */
+      int aq = q, bytes = 640;
+      sscanf(getenv("AW"), "%d:%d", &aq, &bytes);
+      if (aq < g_nq) {
+        uint8_t* b = (uint8_t*)g_qmem[aq];
+        *(uint32_t*)(b + 8) = (uint32_t)bytes;      /* mSize */
+        *(uint32_t*)(b + 12) = 0;                   /* mReserved */
+        *(uint32_t*)(b + 0) = 1;                    /* writePos = 1 个元素 */
+        printf("  AW: q%d 写了 AudioBuffer{size=%d} + writePos=1\n", aq, bytes);
+        usleep((getenv("S") ? atoi(getenv("S")) : 2000) * 1000);
+        for (int i = 0; i < g_nq; i++) {
+          uint8_t* b2 = (uint8_t*)g_qmem[i];
+          printf("  后 q%d(fd %d) :", i, g_qfd[i]);
+          for (int t = 0; t < 64; t += 4) printf(" %d:%u", t, *(uint32_t*)(b2 + t));
+          printf("\n");
+        }
+      }
+    }
     if (q < g_nq && getenv("W") && !getenv("D")) {
       uint8_t* b = (uint8_t*)g_qmem[q];
       if (wwid == 8) *(uint64_t*)(b + woff) = (uint64_t)wval; else *(uint32_t*)(b + woff) = (uint32_t)wval;
