@@ -544,3 +544,15 @@ id=64/65 not found
 - **B：继续用平台方法往下调**：`BpStreamOut::getStreamCommon(this, &sp)`（对象就在 `ret+0`，
   已见其指针），再由 `StreamCommon`/`StreamDescriptor` 一层层交回平台函数解 —— 但取 fd 仍需布局，
   所以 **A 更划算**。
+
+## 21. 【09-26】CAP 插桩为何没触发（+ 唯一可行的替代：改 GOT）
+
+- `AIBinder_transact` 确实导出进了可执行文件的 `.dynsym`，但**插桩没被调用**（`[插桩]` 一行没有）。
+- 原因＝bionic 的查找顺序：`core-V4-ndk.so` 的 `DT_NEEDED` 里就有 `libbinder_ndk.so`，
+  符号在**它自己的依赖链里就满足了**，走不到可执行文件所在的全局作用域 ⇒ classic interposition 在这条链上无效。
+- 可行的替代＝**改 GOT**：从 `/proc/self/maps` 拿 `core-V4-ndk.so` 的加载基址，
+  按 `readelf -r` 里那条 `R_AARCH64_JUMP_SLOT`（`AIBinder_transact`）的 GOT 偏移，
+  `mprotect` 后把槽写成我们自己的钩子（**只改本进程内存，不碰任何文件/分区**）。
+  钩子里 `转发 + 抄 reply` ⇒ 拿到 `IStreamOut` 句柄与 FMQ 的 fd。
+- 本轮结论不变且已实证：**id=63 能在接管轮内开成流**（`fd 74→77`，线程 +1，零采样＝无声；
+  已两次重启 HAL 复现）。M2 只剩"从平台手里接过 reply"这一步。
