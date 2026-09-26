@@ -20,6 +20,7 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 #include <unistd.h>
+#include <time.h>
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -241,6 +242,8 @@ static void* find_binder_in(void* obj, const char* tag) {
   return NULL;
 }
 static int g_nrd;
+static int64_t nowms(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+  return (int64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000; }
 /* 空字符串也算"已设置"⇒ getenv 真值判断是陷阱（本轮 WALL/CSLOT 都被它坑过）*/
 static int flag(const char* n) { const char* v = getenv(n); return v && v[0]; }
 /* 裁判：HAL 进程里所有 write_* 工作线程的累计 CPU（jiffies）。
@@ -943,6 +946,83 @@ int auto_build(void* h) {
       }
     }
   }
+  /* WATCH=毫秒数：高频比对三块队列前 256 字节，抓"谁在动这块共享内存"。
+     纯读、不发事务、不写一帧 ⇒ 无声。判据另有两路：
+     THR 行（write_db 的累计 CPU）+ /proc/<tid>/syscall 的 futex 地址。 */
+  if (getenv("WATCH") && getenv("GOT") && g_nq) {
+    int ms = atoi(getenv("WATCH"));
+    static uint8_t snap[4][256];
+    int changed = 0;
+    for (int i = 0; i < g_nq; i++) memcpy(snap[i], g_qmem[i], 256);
+    int64_t t0 = nowms();
+    int rounds = 0;
+    while (nowms() - t0 < ms) {
+      for (int i = 0; i < g_nq; i++) {
+        uint8_t* b = (uint8_t*)g_qmem[i];
+        if (memcmp(snap[i], b, 256) != 0) {
+          int first = -1, n = 0;
+          for (int t = 0; t < 256; t += 4) {
+            uint32_t a, c; memcpy(&a, snap[i] + t, 4); memcpy(&c, b + t, 4);
+            if (a != c) { if (first < 0) first = t; n++; }
+          }
+          printf("  WATCH +%lldms q%d 变了 %d 个字，首个 @%d：%u -> %u\n",
+                 (long long)(nowms() - t0), i, n, first,
+                 first >= 0 ? *(uint32_t*)(snap[i] + first) : 0,
+                 first >= 0 ? *(uint32_t*)(b + first) : 0);
+          memcpy(snap[i], b, 256);
+          changed++;
+          fflush(stdout);
+        }
+      }
+      usleep(50000);
+      rounds++;
+    }
+    printf("  WATCH: %d 轮比对，共 %d 次变化\n", rounds, changed); fflush(stdout);
+    dump_write_threads("WATCH末");
+  }
+
+  /* TIDS=1：把 HAL 里所有 write_* 线程的 futex 等待地址打出来（syscall 行前两列） */
+  if (getenv("TIDS")) {
+    DIR* d = opendir("/proc");
+    if (d) {
+      struct dirent* de;
+      while ((de = readdir(d))) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        char path[160]; snprintf(path, sizeof path, "/proc/%s/cmdline", de->d_name);
+        FILE* f = fopen(path, "rb");
+        if (!f) continue;
+        char cb[256] = {0};
+        int rn = (int)fread(cb, 1, sizeof cb - 1, f);
+        fclose(f);
+        if (rn <= 0 || !strstr(cb, "audiohalservice")) continue;
+        snprintf(path, sizeof path, "/proc/%s/task", de->d_name);
+        DIR* td = opendir(path);
+        if (!td) continue;
+        struct dirent* te;
+        while ((te = readdir(td))) {
+          char cp[192]; snprintf(cp, sizeof cp, "/proc/%s/task/%s/comm", de->d_name, te->d_name);
+          FILE* cf = fopen(cp, "r");
+          if (!cf) continue;
+          char comm[64] = {0};
+          if (fgets(comm, sizeof comm, cf)) {}
+          fclose(cf);
+          comm[strcspn(comm, "\r\n")] = 0;
+          if (strncmp(comm, "write", 5)) continue;
+          char sp[192]; snprintf(sp, sizeof sp, "/proc/%s/task/%s/syscall", de->d_name, te->d_name);
+          FILE* sf = fopen(sp, "r");
+          char line[256] = {0};
+          if (sf) { if (fgets(line, sizeof line, sf)) {} fclose(sf); }
+          line[strcspn(line, "\n")] = 0;
+          printf("  TIDS: %s tid=%s %s\n", comm, te->d_name, line);
+        }
+        closedir(td);
+        break;
+      }
+      closedir(d);
+      fflush(stdout);
+    }
+  }
+
   void* so = *(void**)sret;
   int st = so ? ((int32_t(*)(const void*))dlsym(N.ndk, "AStatus_getStatus"))(so) : 0;
   printf("TRANSACT st=%d ret前6int=", st);
