@@ -12,6 +12,12 @@
 typedef void AIBinder;
 typedef void AParcel;
 
+static void noop_create(void* a) { (void)a; }
+static void noop_destroy(void* a) { (void)a; }
+static int32_t noop_transact(AIBinder* b, uint32_t c, const void* in, void* out) {
+  (void)b; (void)c; (void)in; (void)out; return 0;
+}
+
 int main(int argc, char** argv) {
   const char* svc = argc > 1 ? argv[1] : "android.hardware.audio.core.IModule/r_submix";
   void* ndk = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_GLOBAL);
@@ -26,6 +32,15 @@ int main(int argc, char** argv) {
   AIBinder* b = SM_get(svc);
   if (!b) { fprintf(stderr, "getService(%s) 空\n", svc); return 4; }
   if (IncStrong) IncStrong(b);
+  /* §7 的老规矩：getService 给的是无 class 裸句柄，不先 associateClass，
+   * 平台 BpModule 内部 prepareTransaction 会失败并留下空 parcel ⇒ 生成码写空指针 SIGSEGV。 */
+  void* (*Class_define)(const char*, void*, void*, void*) = (void*(*)(const char*,void*,void*,void*))dlsym(ndk, "AIBinder_Class_define");
+  int (*Associate)(AIBinder*, const void*) = (int(*)(AIBinder*,const void*))dlsym(ndk, "AIBinder_associateClass");
+  char desc[160]; snprintf(desc, sizeof desc, "%s", svc);
+  char* sl = strrchr(desc, '/'); if (sl) *sl = 0;
+  const void* cls = Class_define(desc, (void*)noop_create, (void*)noop_destroy, (void*)noop_transact);
+  int ast = Associate(b, cls);
+  printf("DIAG associateClass(%s) st=%d\n", desc, ast); fflush(stdout);
   printf("DIAG binder=%p svc=%s\n", (void*)b, svc); fflush(stdout);
 
   static const char* cores[] = {
