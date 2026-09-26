@@ -224,6 +224,20 @@ int main(int argc, char** argv) {
               printf("\n"); fflush(stdout);
             }
           }
+          if (st2 != 0) {   /* 失败也要看回包：EX_SERVICE_SPECIFIC 会带 errorCode+String16 原因 */
+            size_t rsz = N.Parcel_dataSize ? N.Parcel_dataSize(out2) : 0;
+            printf("ARGS2-FAIL reply-size=%zu", rsz);
+            if (out2 && rsz > 0 && rsz <= 512) {
+              static uint8_t fb[512]; int fl = 0;
+              if (parcel_spill(out2, fb, sizeof fb, &fl) == 0) {
+                printf(" 头%d字节:", fl < 64 ? fl : 64);
+                for (int i = 0; i < fl && i < 64; i++) printf(" %02x", fb[i]);
+                printf("\n 可打印:");
+                for (int i = 0; i < fl; i++) if (fb[i] >= 0x20 && fb[i] < 0x7f) putchar((char)fb[i]);
+              }
+            }
+            printf("\n"); fflush(stdout);
+          }
         }
       }
       if (0) {
