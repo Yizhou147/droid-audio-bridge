@@ -1002,8 +1002,8 @@ int auto_build(void* h) {
         int nw = 0;
         for (size_t t = 0; t + 4 <= lim; t += 4) {
           if (getenv("FOFF") && (int)t == atoi(getenv("FOFF")))
-            *(uint32_t*)((char*)g_qmem[q] + t) = 1;   /* 只有事件字才允许被写 */
-          syscall(SYS_futex, (char*)g_qmem[q] + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+            *(uint32_t*)((char*)g_qmem[q] + t) |= (uint32_t)(getenv("FVAL") ? atoi(getenv("FVAL")) : 2);
+          syscall(SYS_futex, (char*)g_qmem[q] + t, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
           nw++;
         }
         printf("  FK: 对 q%d 的 %d 个字发了 FUTEX_WAKE\n", q, nw); fflush(stdout);
@@ -1049,11 +1049,16 @@ int auto_build(void* h) {
     /* libfmq 的 Futex::notify() 是"先把状态字写成 1，再 FUTEX_WAKE"；
      * 只 WAKE 不改值 ⇒ 等的人在 wait() 里复查发现还是 0，又睡回去 —— 这正是
      * 前面几轮 write_db CPU 一直 0 的原因。FOFF 默认 24 = grantor 表里 q0 的事件字。 */
+    /* 实测（/proc/<tid>/syscall）：HAL 的工作线程在
+     *   futex(uaddr=映射+24, FUTEX_WAIT_BITSET(9, 共享而非 private), val=0, bitset=0x2)
+     * ⇒ 通知必须 (a) 把字里的 **bit 0x2（WRITE_NOTIFIED）** 置上，(b) 用**共享**的
+     *    FUTEX_WAKE(op=1) —— FUTEX_WAKE_PRIVATE 是另一个 key，根本唤不醒它。 */
     int foff = getenv("FOFF") ? atoi(getenv("FOFF")) : 24;
-    *(uint32_t*)(cq + foff) = 1;
-    syscall(SYS_futex, cq + foff, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
-    syscall(SYS_futex, cq + wo, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
-    printf("  CMD: 事件字 +%d 写成 1 并 WAKE\n", foff);
+    int fval = getenv("FVAL") ? atoi(getenv("FVAL")) : 2;
+    *(uint32_t*)(cq + foff) |= (uint32_t)fval;
+    syscall(SYS_futex, cq + foff, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
+    syscall(SYS_futex, cq + wo, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
+    printf("  CMD: 事件字 +%d 或上 %d 并用共享 FUTEX_WAKE 唤醒\n", foff, fval);
     if (flag("WALL"))      /* 只 WAKE，不改值 —— 改值会把刚写进去的命令/计数器全盖掉 */
       for (size_t t = 0; t + 4 <= g_qsz[0]; t += 4)
         syscall(SYS_futex, cq + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
