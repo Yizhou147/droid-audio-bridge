@@ -489,136 +489,6 @@ int main(int argc, char** argv) {
     g_gotcap = 1;
   }
   if (getenv("CAP")) { g_cap = 1; }
-  /* ===== PP=1：AudioPatch 的"平台代打"实验 =====
-   * 手搓 4 种打包全被拒（-22 = HAL 侧 Parcel::read 失败；免 size 那版 0x80000008），
-   * 所以改成：① 用平台自己的 BpModule::getAudioPatches 读出 5 条真 patch 的 C++ 对象，
-   *          ② 用 AudioPatch::writeToParcel 把其中一条再编码一次 ⇒ 拿到**框架真发出去的那串字节**，
-   *          ③ 之后所有 patch 都走平台读写，我们只按偏移改 id。 */
-  if (flag("PP")) {
-    void* gap = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule15"
-                  "getAudioPatchesEPNSt3__16vectorINS2_10AudioPatchENS5_9allocatorIS7_EEEE");
-    void* sap = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule13"
-                  "setAudioPatchERKNS3_10AudioPatchEPS7_");
-    void* prd = dlsym(h, "_ZN4aidl7android8hardware5audio4core10AudioPatch14readFromParcelEPK7AParcel");
-    void* pwr = dlsym(h, "_ZNK4aidl7android8hardware5audio4core10AudioPatch13writeToParcelEP7AParcel");
-    printf("  PP: gap=%p sap=%p read=%p write=%p\n", gap, sap, prd, pwr); fflush(stdout);
-    static char pvec[64];
-    static char pws[32];
-    static char pobj[1024];
-    if (flag("PCAP") && gap) {
-      memset(pvec, 0, sizeof pvec);
-      int oc = g_capcode; g_capcode = 8; g_cfg_len = 0;
-      call_sret3(gap, bp, pvec, pvec, pws);
-      g_capcode = oc;
-      char* pb0 = *(char**)&pvec[0]; char* pe0 = *(char**)&pvec[8];
-      long span = (long)(pe0 - pb0);
-      printf("  PP: vector=[%p,%p) span=%ld 回包 %d 字节\n", (void*)pb0, (void*)pe0, span, g_cfg_len);
-      for (int cnt = 1; cnt <= 8; cnt++) {
-        if (span % cnt) continue;
-        long st = span / cnt;
-        if (st < 16 || st > 512 || st % 8) continue;
-        printf("  PP: 候选 count=%d sizeof(AudioPatch)=%ld\n", cnt, st);
-      }
-      /* 对象头 16 个 int32；其中像指针的都把 *ptr 的前两个 int 打出来（sources/sinks 数组就在里面） */
-      long stride = span > 0 ? span / (getenv("PCNT") ? atoi(getenv("PCNT")) : 1) : 0;
-      int cnt = getenv("PCNT") ? atoi(getenv("PCNT")) : 1;
-      if (cnt > 0 && stride > 0 && stride * cnt == span) {
-        for (int e = 0; e < cnt; e++) {
-          char* o = pb0 + (long)e * stride;
-          printf("  PP p%d +%d:", e, (int)(o - pb0));
-          for (int q = 0; q < 16; q++) printf(" %d", *(int*)(o + 4 * q));
-          printf("\n");
-          for (int q = 0; q + 4 <= stride; q += 4) {
-            void* cand = *(void**)(o + q);
-            if (!readable(cand)) continue;
-            int* ip = (int*)cand;
-            printf("      +%2d 指针 %p -> [%d,%d]\n", q, cand, ip[0], readable(ip + 4) ? ip[1] : -9999);
-          }
-        }
-      }
-      /* 平台再编码一次 ⇒ 这就是框架发出的 AudioPatch 字节 */
-      if (pwr && stride > 0) {
-        AParcel* pp2 = N.Parcel_create();
-        int ws = ((int(*)(const void*, AParcel*))pwr)(pb0, pp2);
-        static uint8_t pbb[512]; int pl2 = 0;
-        N.Parcel_setPos(pp2, 0); spill(pp2, pbb, sizeof pbb, &pl2);
-        printf("  PP writeToParcel st=%d %d 字节:", ws, pl2);
-        for (int t = 0; t + 4 <= pl2; t += 4) printf(" %d", *(int*)(pbb + t));
-        printf("\n");
-        if (getenv("SAVEP")) {
-          FILE* fp = fopen(getenv("SAVEP"), "wb");
-          if (fp) { fwrite(pbb, 1, (size_t)pl2, fp); fclose(fp); printf("  PP: 存 %d 字节到 %s\n", pl2, getenv("SAVEP")); }
-        }
-      }
-      fflush(stdout);
-    }
-    /* LOADP=<文件>：把存下来的字节交回平台解析成对象，按 POKE/PPOKE 改 id，再用平台 Bp 发出去。
-     *   POKE=off:val    直接写对象里的 int32（off=0 就是 AudioPatch.id）
-     *   PPOKE=off:val   把对象 off 处的指针跟进去，写它指向数组的第一个 int32（sources/sinks） */
-    if (getenv("LOADP") && prd && sap) {
-      FILE* fp = fopen(getenv("LOADP"), "rb");
-      static uint8_t lb[1024];
-      int ln = fp ? (int)fread(lb, 1, sizeof lb, fp) : -1;
-      if (fp) fclose(fp);
-      printf("  PP: LOADP %s 读到 %d 字节\n", getenv("LOADP"), ln); fflush(stdout);
-      if (ln > 4) {
-        AParcel* ip = N.Parcel_create();
-        for (int t = 0; t + 4 <= ln; t += 4) { int32_t v; memcpy(&v, lb + t, 4); N.Parcel_writeInt32(ip, v); }
-        N.Parcel_setPos(ip, 0);
-        memset(pobj, 0, sizeof pobj);
-        int rc = ((int(*)(void*, const AParcel*))prd)(pobj, ip);
-        printf("  PP: readFromParcel rc=%d 对象头:", rc);
-        for (int q = 0; q < 16; q++) printf(" %d", *(int*)(pobj + 4 * q));
-        printf("\n");
-        for (int q = 0; q < 64; q += 4) {
-          void* cand = *(void**)(pobj + q);
-          if (!readable(cand)) continue;
-          int* ip2 = (int*)cand;
-          printf("      +%2d 指针 %p -> [%d,%d]\n", q, cand, ip2[0], readable(ip2 + 1) ? ip2[1] : -9999);
-        }
-        char* pk = getenv("POKE");
-        if (pk) {
-          char* w1 = strtok(pk, ",");
-          while (w1) {
-            int off = 0, val = 0;
-            if (sscanf(w1, "%d:%d", &off, &val) == 2 && off >= 0 && off + 4 <= (int)sizeof pobj) {
-              *(int32_t*)(pobj + off) = val;
-              printf("  PP: POKE +%d=%d\n", off, val);
-            }
-            w1 = strtok(NULL, ",");
-          }
-        }
-        char* pp3 = getenv("PPOKE");
-        if (pp3) {
-          char* w = strtok(pp3, ",");
-          while (w) {
-            int off = 0, val = 0;
-            if (sscanf(w, "%d:%d", &off, &val) == 2 && off + 4 <= (int)sizeof pobj) {
-              void* tgt = *(void**)(pobj + off);
-              if (readable(tgt)) { *(int32_t*)tgt = val; printf("  PP: PPOKE +%d -> %p = %d\n", off, tgt, val); }
-              else printf("  PP: PPOKE +%d 指针不可读(%p)\n", off, tgt);
-            }
-            w = strtok(NULL, ",");
-          }
-        }
-        if (flag("SENDP")) {
-          static char po[1024]; memset(po, 0, sizeof po);
-          static char pws2[32];
-          int oc2 = g_capcode; g_capcode = -1;
-          call_sret3(sap, bp, pobj, po, pws2);
-          g_capcode = oc2;
-          void* sv = *(void**)pws2;
-          int (*gst)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
-          printf("  PP: setAudioPatch st=%d 回写对象头:", sv && gst ? gst(sv) : -999);
-          for (int q = 0; q < 8; q++) printf(" %d", *(int*)(po + 4 * q));
-          printf("\n"); fflush(stdout);
-        }
-      }
-      fflush(stdout);
-    }
-    if (flag("PSTOP")) { printf("  PP: PSTOP ⇒ 不开流退出\n"); fflush(stdout); return 0; }
-  }
-
   call_sret3(openOut, bp, args, ret, sret);
   if (getenv("GOT")) {
     g_gotcap = 0;
@@ -1106,6 +976,136 @@ int auto_build(void* h) {
   apc_done:
       g_capcode = 15;
     }
+  }
+
+  /* ===== PP=1：AudioPatch 的"平台代打"实验 =====
+   * 手搓 4 种打包全被拒（-22 = HAL 侧 Parcel::read 失败；免 size 那版 0x80000008），
+   * 所以改成：① 用平台自己的 BpModule::getAudioPatches 读出 5 条真 patch 的 C++ 对象，
+   *          ② 用 AudioPatch::writeToParcel 把其中一条再编码一次 ⇒ 拿到**框架真发出去的那串字节**，
+   *          ③ 之后所有 patch 都走平台读写，我们只按偏移改 id。 */
+  if (flag("PP")) {
+    void* gap = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule15"
+                  "getAudioPatchesEPNSt3__16vectorINS2_10AudioPatchENS5_9allocatorIS7_EEEE");
+    void* sap = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule13"
+                  "setAudioPatchERKNS3_10AudioPatchEPS7_");
+    void* prd = dlsym(h, "_ZN4aidl7android8hardware5audio4core10AudioPatch14readFromParcelEPK7AParcel");
+    void* pwr = dlsym(h, "_ZNK4aidl7android8hardware5audio4core10AudioPatch13writeToParcelEP7AParcel");
+    printf("  PP: gap=%p sap=%p read=%p write=%p\n", gap, sap, prd, pwr); fflush(stdout);
+    static char pvec[64];
+    static char pws[32];
+    static char pobj[1024];
+    if (flag("PCAP") && gap) {
+      memset(pvec, 0, sizeof pvec);
+      int oc = g_capcode; g_capcode = 8; g_cfg_len = 0;
+      call_sret3(gap, bp, pvec, pvec, pws);
+      g_capcode = oc;
+      char* pb0 = *(char**)&pvec[0]; char* pe0 = *(char**)&pvec[8];
+      long span = (long)(pe0 - pb0);
+      printf("  PP: vector=[%p,%p) span=%ld 回包 %d 字节\n", (void*)pb0, (void*)pe0, span, g_cfg_len);
+      for (int cnt = 1; cnt <= 8; cnt++) {
+        if (span % cnt) continue;
+        long st = span / cnt;
+        if (st < 16 || st > 512 || st % 8) continue;
+        printf("  PP: 候选 count=%d sizeof(AudioPatch)=%ld\n", cnt, st);
+      }
+      /* 对象头 16 个 int32；其中像指针的都把 *ptr 的前两个 int 打出来（sources/sinks 数组就在里面） */
+      long stride = span > 0 ? span / (getenv("PCNT") ? atoi(getenv("PCNT")) : 1) : 0;
+      int cnt = getenv("PCNT") ? atoi(getenv("PCNT")) : 1;
+      if (cnt > 0 && stride > 0 && stride * cnt == span) {
+        for (int e = 0; e < cnt; e++) {
+          char* o = pb0 + (long)e * stride;
+          printf("  PP p%d +%d:", e, (int)(o - pb0));
+          for (int q = 0; q < 16; q++) printf(" %d", *(int*)(o + 4 * q));
+          printf("\n");
+          for (int q = 0; q + 4 <= stride; q += 4) {
+            void* cand = *(void**)(o + q);
+            if (!readable(cand)) continue;
+            int* ip = (int*)cand;
+            printf("      +%2d 指针 %p -> [%d,%d]\n", q, cand, ip[0], readable(ip + 4) ? ip[1] : -9999);
+          }
+        }
+      }
+      /* 平台再编码一次 ⇒ 这就是框架发出的 AudioPatch 字节 */
+      if (pwr && stride > 0) {
+        AParcel* pp2 = N.Parcel_create();
+        int ws = ((int(*)(const void*, AParcel*))pwr)(pb0, pp2);
+        static uint8_t pbb[512]; int pl2 = 0;
+        N.Parcel_setPos(pp2, 0); spill(pp2, pbb, sizeof pbb, &pl2);
+        printf("  PP writeToParcel st=%d %d 字节:", ws, pl2);
+        for (int t = 0; t + 4 <= pl2; t += 4) printf(" %d", *(int*)(pbb + t));
+        printf("\n");
+        if (getenv("SAVEP")) {
+          FILE* fp = fopen(getenv("SAVEP"), "wb");
+          if (fp) { fwrite(pbb, 1, (size_t)pl2, fp); fclose(fp); printf("  PP: 存 %d 字节到 %s\n", pl2, getenv("SAVEP")); }
+        }
+      }
+      fflush(stdout);
+    }
+    /* LOADP=<文件>：把存下来的字节交回平台解析成对象，按 POKE/PPOKE 改 id，再用平台 Bp 发出去。
+     *   POKE=off:val    直接写对象里的 int32（off=0 就是 AudioPatch.id）
+     *   PPOKE=off:val   把对象 off 处的指针跟进去，写它指向数组的第一个 int32（sources/sinks） */
+    if (getenv("LOADP") && prd && sap) {
+      FILE* fp = fopen(getenv("LOADP"), "rb");
+      static uint8_t lb[1024];
+      int ln = fp ? (int)fread(lb, 1, sizeof lb, fp) : -1;
+      if (fp) fclose(fp);
+      printf("  PP: LOADP %s 读到 %d 字节\n", getenv("LOADP"), ln); fflush(stdout);
+      if (ln > 4) {
+        AParcel* ip = N.Parcel_create();
+        for (int t = 0; t + 4 <= ln; t += 4) { int32_t v; memcpy(&v, lb + t, 4); N.Parcel_writeInt32(ip, v); }
+        N.Parcel_setPos(ip, 0);
+        memset(pobj, 0, sizeof pobj);
+        int rc = ((int(*)(void*, const AParcel*))prd)(pobj, ip);
+        printf("  PP: readFromParcel rc=%d 对象头:", rc);
+        for (int q = 0; q < 16; q++) printf(" %d", *(int*)(pobj + 4 * q));
+        printf("\n");
+        for (int q = 0; q < 64; q += 4) {
+          void* cand = *(void**)(pobj + q);
+          if (!readable(cand)) continue;
+          int* ip2 = (int*)cand;
+          printf("      +%2d 指针 %p -> [%d,%d]\n", q, cand, ip2[0], readable(ip2 + 1) ? ip2[1] : -9999);
+        }
+        char* pk = getenv("POKE");
+        if (pk) {
+          char* w1 = strtok(pk, ",");
+          while (w1) {
+            int off = 0, val = 0;
+            if (sscanf(w1, "%d:%d", &off, &val) == 2 && off >= 0 && off + 4 <= (int)sizeof pobj) {
+              *(int32_t*)(pobj + off) = val;
+              printf("  PP: POKE +%d=%d\n", off, val);
+            }
+            w1 = strtok(NULL, ",");
+          }
+        }
+        char* pp3 = getenv("PPOKE");
+        if (pp3) {
+          char* w = strtok(pp3, ",");
+          while (w) {
+            int off = 0, val = 0;
+            if (sscanf(w, "%d:%d", &off, &val) == 2 && off + 4 <= (int)sizeof pobj) {
+              void* tgt = *(void**)(pobj + off);
+              if (readable(tgt)) { *(int32_t*)tgt = val; printf("  PP: PPOKE +%d -> %p = %d\n", off, tgt, val); }
+              else printf("  PP: PPOKE +%d 指针不可读(%p)\n", off, tgt);
+            }
+            w = strtok(NULL, ",");
+          }
+        }
+        if (flag("SENDP")) {
+          static char po[1024]; memset(po, 0, sizeof po);
+          static char pws2[32];
+          int oc2 = g_capcode; g_capcode = -1;
+          call_sret3(sap, bp, pobj, po, pws2);
+          g_capcode = oc2;
+          void* sv = *(void**)pws2;
+          int (*gst)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+          printf("  PP: setAudioPatch st=%d 回写对象头:", sv && gst ? gst(sv) : -999);
+          for (int q = 0; q < 8; q++) printf(" %d", *(int*)(po + 4 * q));
+          printf("\n"); fflush(stdout);
+        }
+      }
+      fflush(stdout);
+    }
+    if (flag("PSTOP")) { printf("  PP: PSTOP ⇒ 不开流退出\n"); fflush(stdout); return 0; }
   }
 
   call_sret3(openOut, bp, args, ret, sret);
