@@ -100,6 +100,7 @@ static uint8_t g_greply[8192];
 static int g_greply_len;
 static AIBinder* g_gstream;
 static int g_capcode = 15;                      /* APC 用：额外抄这个码的回包 */
+static int g_devid = -1;               /* LOAD2 建出来的"扬声器设备端口"config id，当 patch 的 sink */
 static uint8_t g_cfg[200000]; static int g_cfg_len;   /* getAudioPortConfigs / setAudioPortConfig 回包 */
 static int g_nq;                       /* GOT 抓到的 FMQ 队列数 */
 static int g_qfd[4];
@@ -839,6 +840,11 @@ int auto_build(void* h) {
             else printf("  SAVE: 写 %s 失败\n", getenv("SAVE"));
             fflush(stdout);
           }
+          if (flag("SAVEONLY")) {   /* 只抄模板就收工：绝不开流，不占端口 */
+            g_gotcap = 0;
+            printf("  SAVE: SAVEONLY ⇒ 不开流直接退出\n"); fflush(stdout);
+            return 0;
+          }
         }
         char* usecfg = NULL;
         if (getenv("LOAD")) {
@@ -882,6 +888,53 @@ int auto_build(void* h) {
           }
           g_capcode = 15;
           tmpl = usecfg;   /* 让后面模板分支不再动 vector */
+        }
+        /* LOAD2=<dev cfg 字节文件> DEVPORT=<端口号>：再克隆一份 config —— 这次是**扬声器设备端口**
+         * （portId 23）。框架正常路径里 AudioPolicy 会把设备端口也 setAudioPortConfig 一遍，
+         * 我们接管轮里没有它，patch 就没有汇点可指。建出来的 id 存 g_devid 给 PATCH 用。 */
+        if (getenv("LOAD2")) {
+          int want2 = getenv("DEVPORT") ? atoi(getenv("DEVPORT")) : 23;
+          void* raf2 = dlsym(h, "_ZN4aidl7android5media5audio6common15AudioPortConfig14readFromParcelEPK7AParcel");
+          FILE* fp2 = fopen(getenv("LOAD2"), "rb");
+          if (!raf2) printf("  LOAD2: 缺 AudioPortConfig::readFromParcel\n");
+          else if (!fp2) printf("  LOAD2: 打不开 %s\n", getenv("LOAD2"));
+          else {
+            static uint8_t fb2[8192];
+            int rn2 = (int)fread(fb2, 1, sizeof fb2, fp2); fclose(fp2);
+            static char obj2[1024]; memset(obj2, 0, sizeof obj2);
+            AParcel* ip2 = N.Parcel_create();
+            for (int t = 0; t + 4 <= rn2; t += 4) {
+              int32_t v; memcpy(&v, fb2 + t, 4);
+              N.Parcel_writeInt32(ip2, v);
+            }
+            N.Parcel_setPos(ip2, 0);
+            int rc2 = ((int(*)(void*, const AParcel*))raf2)(obj2, ip2);
+            printf("  LOAD2: 读到 %d 字节 readFromParcel rc=%d ⇒ id=%d portId=%d\n",
+                   rn2, rc2, *(int*)obj2, *(int*)(obj2 + 4)); fflush(stdout);
+            if (rc2 != 0) { printf("  LOAD2: 解析失败，不发事务\n"); }
+            else if (!sac) printf("  LOAD2: 缺 setAudioPortConfig\n");
+            else {
+              *(int*)obj2 = 0;                                  /* id=0 ⇒ 新建 */
+              static char r2[512]; memset(r2, 0, sizeof r2);
+              static char ok2[8]; static char st2[64];
+              int oldcap = g_capcode; g_capcode = 18; g_cfg_len = 0;
+              call_sret4(sac, bp, obj2, r2, ok2, st2);
+              void* sv2 = *(void**)st2;
+              int (*gst2)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+              printf("  LOAD2: setAudioPortConfig(portId=%d) st=%d ok=%d ⇒ 新 id=%d portId=%d\n",
+                     want2, sv2 && gst2 ? gst2(sv2) : -999, *(int*)ok2,
+                     *(int*)r2, *(int*)(r2 + 4));
+              /* 回包里是完整的 AudioPortConfig 字节 ⇒ 抄下来，字段对不对 HAL 的明文回显会告我们 */
+              if (g_cfg_len > 0) {
+                printf("  LOAD2: 回包 %d 字节:", g_cfg_len);
+                for (int t = 0; t + 4 <= g_cfg_len && t < 60; t += 4) printf(" %d", *(int*)(g_cfg + t));
+                printf("\n");
+              }
+              if (*(int*)r2 > 0) g_devid = *(int*)r2;
+              g_capcode = oldcap;
+            }
+          }
+          fflush(stdout);
         }
         if (!sac) printf("  ACP: 没有 setAudioPortConfig 符号，跳过\n");
         else if (!tmpl || getenv("LOAD") || (getenv("NOPRE") && atoi(getenv("NOPRE")) == 1)) printf("  ACP: 模板法没命中（stride 反推失败）\n");
@@ -1110,6 +1163,46 @@ int auto_build(void* h) {
   for (int k = 0; k < 6; k++) { int32_t v; memcpy(&v, ret + 4 * k, 4); printf("%d ", v); }
   printf("\n"); fflush(stdout);
   if (st != 0 || !getenv("STREAM")) return st == 0 ? 0 : 8;
+
+  /* ===== PATCH=1：给这条流接上扬声器 =====
+   * HAL 的 StreamOutPrimary::configure 会去 Module::findConnectedDevices(我们的 portConfigId) 找设备，
+   * 找不到就打 "no connected devices on stream!!" 并让 transfer 失败 ⇒ 数据被消费但永远到不了 PAL/扬声器。
+   * 框架正常路径是 AudioPolicy 发 IModule.setAudioPatch（码 17）。
+   * 回包实测格式（out/dump/d8.log，5 条真 patch）：每元素 = [1][size=32][id][1][源configId][1][汇configId][0][0]
+   * ⇒ 源/汇是**portConfigId 引用**，不是整份 AudioPortConfig。顶层参数前面照规矩跟一个 objectSize。 */
+  if (flag("PATCH")) {
+    int ps = getenv("PSRC") ? atoi(getenv("PSRC")) : *(int32_t*)args;
+    int pd = getenv("PSINK") ? atoi(getenv("PSINK")) : g_devid;
+    int pid = getenv("PATCHID") ? atoi(getenv("PATCHID")) : 0;
+    uint32_t pcode = (uint32_t)(getenv("PCODE") ? strtoul(getenv("PCODE"), NULL, 0) : 17);
+    int (*PrepM)(AIBinder*, AParcel**) =
+      (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
+    int (*TxM)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) =
+      (int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))
+        (g_orig_tx ? g_orig_tx : dlsym(N.ndk, "AIBinder_transact"));
+    AParcel* pin = NULL; AParcel* pout = NULL;
+    printf("PATCH: code=%u id=%d src=%d sink=%d\n", pcode, pid, ps, pd); fflush(stdout);
+    if (!PrepM || !TxM) printf("  PATCH: 缺 prepare/transact\n");
+    else if (ps <= 0 || pd <= 0) printf("  PATCH: src/sink 没准备好（src=%d sink=%d）\n", ps, pd);
+    else if (PrepM(b, &pin)) printf("  PATCH: prepare 失败\n");
+    else {
+      N.Parcel_writeInt32(pin, 32);          /* AudioPatch objectSize */
+      N.Parcel_writeInt32(pin, pid);
+      N.Parcel_writeInt32(pin, 1); N.Parcel_writeInt32(pin, ps);
+      N.Parcel_writeInt32(pin, 1); N.Parcel_writeInt32(pin, pd);
+      N.Parcel_writeInt32(pin, 0); N.Parcel_writeInt32(pin, 0);
+      int oldcap = g_capcode; g_capcode = -1;      /* 别把这次的回包抄进 g_cfg */
+      int rs = TxM(b, pcode, &pin, &pout, 0);
+      g_capcode = oldcap;
+      size_t psz = pout ? N.Parcel_dataSize(pout) : 0;
+      static uint8_t pb[512]; int pl = 0;
+      if (pout) { N.Parcel_setPos(pout, 0); spill(pout, pb, sizeof pb, &pl); }
+      printf("  PATCH: st=%d 回包 %zu 字节 %d:", rs, psz, pl);
+      for (int t = 0; t + 4 <= pl; t += 4) printf(" %d", *(int*)(pb + t));
+      printf("\n");
+    }
+    fflush(stdout);
+  }
 
   /* §18.1：从 Return 缓冲里扫候选指针 ⇒ 若其 vptr 像 C++ 对象且 +8 处像 AIBinder*，
    * 就拿它对 code 1 (getStreamCommon) 发一次原始事务；st=0 且回包非空即命中 stream 句柄。 */
