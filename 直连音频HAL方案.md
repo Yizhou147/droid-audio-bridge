@@ -707,3 +707,43 @@ controlMQ = `Command`），只是被搬进了 AIDL。三块 ashmem = 这三个�
 "日志一切正常，就是新加的那段没打印"。改成**普通赋值 `Q="$1" W="$2"`** 就通了。
 另：`grep -a` 的中文模式经 adb→sh→grep 多层传递会匹配失败，验证输出时一律用 ASCII 模式，
 或者干脆 `sed -n 'A,Bp'` 直接看原文。
+
+### 22.10 【09-26 14:4x】首包实验：三种元数据假设都没被 HAL 认领
+
+HAL 自己在 logcat 里把关键参数说出来了（这是本轮最有用的旁证）：
+
+```
+AHAL_Module_QTI: openOutputStream: port config id 63, has offload info? 0, buffer size 2048 frames
+AHAL_Module_QTI: createStreamContext: frame size 8 bytes
+AHAL_Stream_QTI: setThreadName rename for tid : write_spatial, flag:AudioIoFlags{output: 65536}
+AHAL_Stream_QTI: initInstance: increase scheduling for tid : 8163
+AHAL_StreamOut_MI: MiStreamOutPrimary: enter
+AHAL_Stream_QTI: getStreamCommon: returning 0xb400…            ← 我们的调用
+```
+
+⇒ **port 63 = `SPATIAL_PLAYBACK` usecase**，frame size 8 字节，2048 帧 ⇒ `2048×8 = 16384`
+正好等于 q2(fd 11) 的大小 ⇒ **q2 就是 data 队列**（q0/q1 各 4096 = 命令/回包队列）。
+
+三次写试验（每次 3 秒观察窗，全部零载荷＝静音）：
+
+| 写法 | 结果 |
+|---|---|
+| q2 +0 写 u32=1（把 writePos 当"元素个数"） | readPos(+4) 不动，q0/q1 全不动 |
+| q2 +8 写 `AudioBuffer{mSize=640}` 且 writePos=1 | 同上 |
+| q2 +0 写 u32=640（把 writePos 当"字节数"） | 同上 |
+| q0 +0 写 u32=1 | 同上 |
+
+且 HAL **没有任何 `pal_start`/worker 活动日志** ⇒ 结论：worker 线程建好了但**不轮询我们的假设布局**。
+两种可能，暂时无法区分：① 元数据/元素布局仍不对（`AidlMessageQueue` 的 word/metadata 版本差异）；
+② 这条流需要一次"启动"动作（命令队列里的 Command，或 eventfd 通知）才会开始读 —— 注意
+**回包里没有 eventfd**（三个 fd 全是 ashmem），所以如果是靠通知驱动，协议一定还缺一个环节。
+
+### 22.11 取"权威 FMQ 协议"的最便宜办法（推荐，需要回 anland）
+
+不要再靠猜布局试错。**在 anland 态让框架自己跑一条真流，直接读那条流的两块 ashmem 头部**：
+框架写的 writePos/读到的 readPos 会告诉我们真实偏移、单位（字节还是元素）、以及哪块队列是哪个方向，
+一次观测同时给出"命令/回包/数据"三块队列的身份。纯只读、不发事务、不影响用户听的东西。
+拿到布局后原样套到我们直开的流上即可。
+
+（另一条更贵的路：反编译 `libaudioclient.so`/`libaudioaidlcommon.so` 里的 `AidlMessageQueue<T>`
+实现来推布局 —— 设备上这些符号是 stripped 的，字符串里也搜不到 `AidlMessageQueue`，成本高。）
