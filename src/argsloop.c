@@ -120,7 +120,7 @@ static const char* g_mod = "android.hardware.audio.core-V4-ndk.so";
 /* scudo 的堆指针带 0xb400… 顶层 tag，任何"按数值范围判指针"的写法都会把它们全滤掉
  * （STREAM 扫描就是这么连续几轮扫到空的）。唯一可信的判据：这个地址在我自己进程的
  * 某条可读映射里。映射表读一次缓存起来。 */
-static struct { unsigned long a, b; char r; } g_mmap[1024];
+static struct { unsigned long a, b; char r; } g_mmap[16384];
 static int g_nmmap;
 static void load_maps(void) {
   if (g_nmmap) return;
@@ -135,13 +135,20 @@ static void load_maps(void) {
   }
   fclose(f);
 }
+static int g_nrd;
 static int readable(void* p) {
   unsigned long v = (unsigned long)p & ((1UL << 48) - 1);   /* 去掉 scudo/MTE 的顶层 tag */
-  if ((unsigned long)p < 0x1000 || v < 0x1000) return 0;
-  load_maps();
-  for (int i = 0; i < g_nmmap; i++)
-    if (v >= g_mmap[i].a && v + 8 <= g_mmap[i].b && g_mmap[i].r) return 1;
-  return 0;
+  int res = 0;
+  if ((unsigned long)p >= 0x1000 && v >= 0x1000) {
+    load_maps();
+    for (int i = 0; i < g_nmmap; i++)
+      if (v >= g_mmap[i].a && v + 8 <= g_mmap[i].b && g_mmap[i].r) { res = 1; break; }
+  }
+  if (getenv("DBG") && g_nrd < 30) {
+    printf("  readable(%p→%lx)=%d 映射段=%d\n", p, v, res, g_nmmap); fflush(stdout);
+    g_nrd++;
+  }
+  return res;
 }
 static int install_got_hook(const char* modname, void* real) {
   /* 槽地址 = 模块载入基址 + .rela.plt 给的静态偏移（AIBinder_transact = 0x5b400，
@@ -571,15 +578,20 @@ int auto_build(void* h) {
   for (int off = 0; off < 128; off += 8) { void* w = *(void**)(ret + off);
     printf("%d=%p%s ", off, w, readable(w) ? "*" : ""); }
   printf("\n"); fflush(stdout);            /* 带 * 的是我进程里真能读的地址 */
+  g_nrd = 0;
   for (int off = 0; off + 16 <= 128; off += 8) {   /* 只扫 Return 头部，别拿随机指针往别的 binder 对象发事务 */
     void* cand = *(void**)(ret + off);
     if (!readable(cand)) continue;                 /* 带 scudo tag 的堆指针，按数值范围判必全灭 */
     void* vptr = *(void**)cand;
-    if (!readable(vptr)) continue;
-    void* maybe = *(void**)((char*)cand + 8);      /* BpInterface 的 mRemoteBinder */
-    if (!readable(maybe)) continue;
+    Dl_info dv = {0};
+    int hv = dladdr(vptr, &dv);
+    const char* vf = hv && dv.dli_fname ? strrchr(dv.dli_fname, '/') + 1 : "-";
+    void* maybe = readable(vptr) ? *(void**)((char*)cand + 8) : NULL;   /* BpInterface 的 mRemoteBinder */
     AParcel* in3 = NULL; AParcel* out3 = NULL;
-    printf("  cand ret+%d = %p vptr=%p +8=%p\n", off, cand, vptr, maybe); fflush(stdout);
+    printf("  cand ret+%d=%p vptr=%p<-%s:%s +8=%p\n", off, cand, vptr, vf,
+           hv && dv.dli_sname ? dv.dli_sname : "?", maybe); fflush(stdout);
+    if (getenv("DBG")) { printf("  候选 %p：跳过实际事务（DBG）\n", maybe); continue; }
+    if (!readable(maybe)) continue;
     if (!Prep2((AIBinder*)maybe, &in3)) {
       N.Parcel_writeInt32(in3, 0);
       int s3 = Tx2((AIBinder*)maybe, 1, &in3, &out3, 0);
