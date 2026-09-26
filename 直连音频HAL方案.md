@@ -461,3 +461,35 @@ system_suspend 存活），AAudio 复用 anland 态已验证的真链路（音�
    之后用 `createMmapBuffer`（码待取）或直接写 FMQ 的 AudioRingBuffer，**仍只写零帧**，判据＝HAL 侧
    readBack 指针/`/dev/shm` 增长、且 `dumpsys` 里流活跃。
 3. 目标要挑**通向喇叭的 mix port**（需从 dumpsys 的 patch/route 里对出来），或先用任意一个把数据面打通。
+
+## 18. 【09-26 M2 起点】手发包被排除项清单 + 正解＝从 Return 内存抠 IStreamOut
+
+`stream-probe`（纯原始 NDK binder：open→取 stream binder→getStreamCommon→扫 fd）实测：
+
+| 试验 | 结果 |
+|---|---|
+| 手发 88B 骨架 flags=0 | `st=0x80000008`（marshal 失败） |
+| 手发同上 flags=0x10 / 0x10000010 | `st=-22`（BAD_VALUE，**ACCEPT_FDS 这条路本身被拒**） |
+| 手发同上 flags=0x10000000（平台用的值） | 仍 `st=0x80000008` |
+| **平台 `BpModule::openOutputStream`（§17）** | **成功**（HAL fd+3、线程+1） |
+
+⇒ 差异不在 flags，而在**打包细节**（我手写的字节与平台 `writeToParcel` 的产物仍有出入：`B` 槽占 24B 数据的对齐、i64 前对齐等；`AParcel_writeByte` 每字节占 4 格这类坑）。
+而"我手发字节 → 平台 `Arguments::readFromParcel` 解成结构体 → 平台 `BpModule` 重新打包发出"这条链**已经证明可用**（§17 的成功正是这条）。
+
+### 18.1 M2 的正解（不再手发包）
+1. openOutputStream 用 `BpModule`（平台打包）；
+2. 从 `OpenOutputStreamReturn` 缓冲区里**扫出指针**：候选指针首槽 vptr 若等于库内 `BpStreamOut` 的 vtable 地址即命中，
+   `+8` 处即 `ndk::SpAIBinder`（= `AIBinder*`）——命中判据：拿它对 **code 1 `getStreamCommon`** 发原始事务，
+   返回 `st=0` 且回包非空即证明是 stream 句柄；
+3. `getStreamCommon` 回包里用 `AParcel_readParcelFileDescriptor` 扫出 FMQ 的 fd（`fcntl(F_GETFD)` 校验）
+   —— **该 API 已确认存在**；
+4. `mmap(fd)` 后只写**全零帧**，判据＝HAL 侧 readBack 推进 / `/dev/shm` 出现 AGM 缓冲（现在 shm 一直 0，
+   因为从未 write）。
+
+### 18.2 已确认的静态事实（省得再查）
+- `IStreamOut` 码表（PLT 反查 GOT 得到，可信）：1 `getStreamCommon`、2 `updateMetadata`、3 `updateOffloadMetadata`、
+  4/5 `get/setHwVolume`、8/9 `get/setDualMonoMode`、10 `getRecommendedLatencyModes`、11 `setLatencyMode`、
+  12/13 `get/setPlaybackRateParameters`、`getInterfaceHash=0xFEFFFFFE`；**没有 write()、没有 createMmapBuffer**
+  ⇒ 数据面只能走 `StreamDescriptor`/`AudioRingBuffer`（FMQ），其 fd 从 `getStreamCommon` 回包里取。
+- 遗留：我在 `default` 上开了 10+ 条流没关（fd 74→77、线程 35→36，端口被 `maxActiveStreamCount:1` 占住）；
+  清法＝重启安卓或 `pkill -x android.hardware.audio.service`（**属改动设备状态，等用户点头**）。
