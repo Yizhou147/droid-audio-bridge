@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/syscall.h>
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -326,8 +325,7 @@ int auto_build(void* h) {
           int fd = -1;
           int rr = rFd ? (N.Parcel_setPos(out3, pos), rFd(out3, &fd)) : -1;
           if (rr == 0 && fd >= 0 && fd < 4096) {
-            int valid = (int)syscall(2, fd, 1, 0);   /* sys_fcntl(F_GETFD) 走不了就直接报数 */
-            printf("  fd@%d = %d (probe=%d)\n", pos, fd, valid);
+            printf("  PFD@%d = %d\n", pos, fd);
             fflush(stdout);
           }
           if (rFd2) { int f2 = -1; N.Parcel_setPos(out3, pos); if (rFd2(out3, &f2) == 0 && f2 >= 0 && f2 < 4096) { printf("  FileDescriptor@%d = %d\n", pos, f2); fflush(stdout); } }
@@ -340,5 +338,4 @@ int auto_build(void* h) {
   fflush(stdout);
   return stream ? 0 : 9;
 }
-#include <sys/syscall.h>
 
