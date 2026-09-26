@@ -747,3 +747,59 @@ AHAL_Stream_QTI: getStreamCommon: returning 0xb400…            ← 我们的�
 
 （另一条更贵的路：反编译 `libaudioclient.so`/`libaudioaidlcommon.so` 里的 `AidlMessageQueue<T>`
 实现来推布局 —— 设备上这些符号是 stripped 的，字符串里也搜不到 `AidlMessageQueue`，成本高。）
+
+## 23. 【09-26 15:2x ★关键转折】port 63 是**错端口**；FMQ 布局解出来了；B′ 路线被再次实证
+
+### 23.1 FMQ 元数据布局（从回包里的四元组直接读出，不再是猜）
+
+回包里每个队列描述符都带 4 条 `(类型=0, 偏移, 宽度)` 记录，用平台解析后的 `ret` 指针
+（DEEP=1）+ 原始 hexdump 双向对上：
+
+| 队列 | 计数器/数据区 |
+|---|---|
+| q0 (fd 9, 4096) | `(+0,宽8) (+8,宽8) (+16,宽8) (+24,宽4)` |
+| q1 (fd 10, 4096) | `(+0,宽8) (+8,宽8) (+16,宽56) (+72,宽4)` |
+| q2 (fd 11, 16384) | `(+0,宽8) (+8,宽8) (+16,宽16384)` —— 正好 = 2048 帧 × 8 字节 ⇒ **数据队列** |
+
+⇒ 元数据不是 8 字节而是 **16 字节两个 u64 计数器 + 数据区从 +16 开始**。
+§22.8 那三次写试验全打在错误偏移上（+0/+4 其实是 read 计数器那半边），所以"没人轮询"的结论**作废**。
+
+### 23.2 用正确偏移再试：仍然不消费，因为**根本没 start**
+
+`Q=2 W=8:640:8 FK=1`（把 element write 计数器写成 640 并对头部每个字发 `FUTEX_WAKE`）：
+3 秒内 q2 的 +0 不动、q0/q1 全 0、HAL 无 `start` 日志。
+`UM=1`（用平台 `BpStreamOut::updateMetadata` 发全零 SourceMetadata）→ `status=0`，但 HAL 一行日志都不打。
+
+### 23.3 ★真正的错：port 63 = `SPATIAL_PLAYBACK`，不是媒体输出
+
+框架自己那条流的日志（我这边喂**全零帧**触发的，静音）：
+
+```
+15:16:38.047  APM_AudioPolicyManager: startSource[[portId:5][io:21, deep_buffer_out]] prevDevice {AUDIO_DEVICE_OUT_SPEAKER, @:}
+15:16:38.049  AHAL_StreamOut_MI: setAggregateSourceMetadataV7 : usecase: DEEP_BUFFER_PLAYBACK IoHandle: 21 usage is 1 content is 2
+15:16:38.049  AHAL_StreamOut_QTI: start : usecase: DEEP_BUFFER_PLAYBACK IoHandle: 21        ← 我们那条从未出现
+```
+
+而我们从没出现过 `start`，只有 `MiStreamOutPrimary: enter` + `write_spatial` 线程建好。
+另外注意：**AudioPolicy 的 portId 和 HAL 的 portId 是两套编号** —— HAL 里 `portId: 5` 是 `voice_tx`
+（`setAudioPortConfig: created new port config for voice_tx AudioPortConfig{id: 59, portId: 5 …}`）。
+所以"深混音输出端口"必须在 `getAudioPorts` 的 52 个端口里按 **flags=DEEP_BUFFER + profile(48000/INT_16/layoutMask 3) + device=speaker** 找，
+而不是照 APM 日志里的数字猜。
+
+### 23.4 下一步（A 路唯一正确的开局）
+
+1. 解码 `getAudioPorts` 的 19164B 回包，列出 52 个端口的 `portId / role / flags / profiles / devices`，
+   挑出 DEEP_BUFFER(或 PRIMARY/FAST) 的 **输出 mix 端口**；
+2. 手发 `setAudioPortConfig`（`AudioPortConfig{portId, 48000, INT_16, layoutMask 3, flags}`），
+   **新 oracle 极好用**：HAL 会把收到的结构**逐字段明文打回来**
+   （`setAudioPortConfig: requested AudioPortConfig{id: 0, portId: 5, sampleRate: Int{value: 48000}, …}`）
+   ⇒ 打包对不对，一眼可判，不用再靠 -74/-22 猜；
+3. 用回包给的**新 id** 去 `openOutputStream`，这次期望看到 `AHAL_StreamOut_QTI: start`；
+4. start 之后 §23.1 的 FMQ 偏移才可能真正生效（数据区 +16、element 计数器 +0/+8）。
+
+### 23.5 顺带被再次实证的 B′ 路线
+
+刚才那次"喂零帧"就是走 anland 的 `aa-bridge`(AAudio sink) → audioserver → HAL：
+**PAL 真的 start 了、设备就是 `AUDIO_DEVICE_OUT_SPEAKER`**，而且全程零采样＝完全静音。
+也就是说：只要接管轮里 audioserver/HAL 不被杀掉（B′），现成的桥立刻就有声，
+不需要 FMQ 那层。A 路目前的价值只剩"接管轮内不依赖 audioserver"。
