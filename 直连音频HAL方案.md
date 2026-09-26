@@ -1588,3 +1588,26 @@ KDE 快捷键本来就绑好了：`~/.config/kglobalshortcutsrc` 里
 2. 若 B 出问题 → 退回 A：`volume_up` 用 IRQ127 计数跳变；音量- 先做单次按键 diff 定位行/ADC 通道。
 3. 接线：`desk-takeover.sh` 起来后拉起、`kill_linux_stack`/`desk-stop.sh`/rollback 里杀掉
    （和 `aa-feeder.sh` 同一处，注意别用 `pkill -f` 自匹配，按 pid 杀）。
+
+---
+
+## 41. FMQ 几何与采样格式硬事实（踩过两次以上，别再重新推）
+
+1. **每条 FMQ 的 mmap 布局**：`[u64 read@0][u64 write@8][elements@16][u32 EventFlag @16+capacity]`；
+   **read/write 指针按"字节"计数，不是元素个数**。通知位：`WRITE_NOTIFIED=1`、`READ_NOTIFIED=2`，
+   唤醒靠共享 futex（`syscall(SYS_futex, flagAddr, FUTEX_WAKE, INT_MAX, …)`）。
+2. **dataMQ 可用环长 = 映射大小 − 4096**：deep_buffer 20480→16384，low_latency 16384→12288。
+   曾经写成 `dcap > 16408 ? 16384 : 0` ⇒ low_latency 下算出 **0**，表现为"程序在跑、HAL 在收、
+   喇叭一声不响"的**假放音**。判"有没有真在投数据"只看 `SINK … fed/cons` 是否随时间增长。
+3. **reply 队列容量只有 1 个 56 字节槽** ⇒ 必须"一问一答"：发一条命令后先轮
+   `write >= read + 56`（`wait_rpy_ms`）再取，取完推进 `read += 56` 并置 `READ_NOTIFIED`+wake。
+   消费一个还没写入的槽 = HAL 侧 `writeBlocking` **永久卡死**（现象：cmd/data/rpy 三个指针全冻结）。
+4. **reply 元素字段偏移**（字节）：`+0 status`、`+4 fmqByteCount(i32)`、`+8 observable.frames`、
+   `+24 hardware.frames`、`+40 latencyMs`、`+44 xrun`、`+48 state`。
+   `state=3` 才是 ACTIVE；`xrun` 与非零 `lat` 用来判投喂节奏。
+5. **格式按 usecase 分**：`deep_buffer_out` 支持 INT_16 / FIXED_Q_8_24 / INT_24 / **INT_32**
+   （我们克隆的是 INT_32，帧长 8 字节）；**`low_latency_out` 只支持 INT_16**（帧长 4 字节）。
+   给 low_latency 按 32 位喂 ⇒ 尖锐/爆音。argsloop 里用 `FRAME=4|8` 显式选，别凭印象。
+   `direct_pcm_out`/compress 才独占 `LAYOUT_QUAD/5.1/…`（真要 4 声道喂数据就从这条走）。
+6. **空字符串环境变量**：`getenv("ROUNDS") ? atoi(...) : 18` 在 `ROUNDS=`（设了但为空）时取到 0
+   ⇒ 又一类"静默不干活"。统一走 `flag()` + 显式默认值。
