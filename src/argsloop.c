@@ -268,6 +268,7 @@ static void dump_write_threads(const char* tag) {
       char comm[64] = {0};
       if (fgets(comm, sizeof comm, cf)) {}
       fclose(cf);
+      comm[strcspn(comm, "\r\n")] = 0;
       if (strncmp(comm, "write", 5)) continue;
       char sp[192]; snprintf(sp, sizeof sp, "/proc/%s/task/%s/stat", de->d_name, te->d_name);
       FILE* sf = fopen(sp, "r");
@@ -1065,6 +1066,12 @@ int auto_build(void* h) {
     for (int t = 16; t < 72; t += 4) printf(" %d:%d", t, *(int32_t*)(rq + t));
     printf("\n  （Reply 字段：status fmqByteCount | observable.frames/timeNs | "
            "hardware.frames/timeNs | latencyMs xrunFrames state）\n");
+    for (int i = 0; i < g_nq; i++) {
+      uint8_t* b2 = (uint8_t*)g_qmem[i];
+      printf("  AFTER q%d(fd %d, %zu) head32:", i, g_qfd[i], g_qsz[i]);
+      for (int t = 0; t < 32 && (size_t)t < g_qsz[i]; t += 4) printf(" %d:%u", t, *(uint32_t*)(b2 + t));
+      printf("\n");
+    }
     fflush(stdout);
   }
   hunt_fds("Return(平台解析后的结构)", ret, 512);
