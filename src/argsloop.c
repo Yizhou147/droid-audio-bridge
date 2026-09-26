@@ -95,6 +95,8 @@ static int g_gotcap;
 static uint8_t g_greply[8192];
 static int g_greply_len;
 static AIBinder* g_gstream;
+static int g_capcode = 15;                      /* APC 用：额外抄这个码的回包 */
+static uint8_t g_cfg[200000]; static int g_cfg_len;   /* getAudioPortConfigs / setAudioPortConfig 回包 */
 static int g_nq;                       /* GOT 抓到的 FMQ 队列数 */
 static int g_qfd[4];
 static void* g_qmem[4];
@@ -106,6 +108,13 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
   int (*o)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) =
     (int (*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))g_orig_tx;
   int r = o(b, code, in, out, flags);
+  if (g_gotcap && code == g_capcode && code != 15 && r == 0 && out && *out) {
+    /* AudioPortConfig 里没有 fd/binder ⇒ 整包可逐字节抄（这些码的回包没有对象区） */
+    g_cfg_len = 0;
+    spill(*out, g_cfg, (int)sizeof g_cfg, &g_cfg_len);
+    N.Parcel_setPos(*out, 0);
+    printf("  CAP 码%d 抄到 %d 字节\n", code, g_cfg_len); fflush(stdout);
+  }
   if (g_gotcap && code == 15 && r == 0 && out && *out) {
     AParcel* op = *out;
     g_greply_len = 0;
