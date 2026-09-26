@@ -241,6 +241,8 @@ static void* find_binder_in(void* obj, const char* tag) {
   return NULL;
 }
 static int g_nrd;
+/* 空字符串也算"已设置"⇒ getenv 真值判断是陷阱（本轮 WALL/CSLOT 都被它坑过）*/
+static int flag(const char* n) { const char* v = getenv(n); return v && v[0]; }
 /* 裁判：HAL 进程里所有 write_* 工作线程的累计 CPU（jiffies）。
  * 我们那条流的工作线程 CPU 从 0 开始涨 ⇒ 它真的消费了我们写的东西。 */
 static void dump_write_threads(const char* tag) {
@@ -994,19 +996,20 @@ int auto_build(void* h) {
       uint8_t* b = (uint8_t*)g_qmem[q];
       if (wwid == 8) *(uint64_t*)(b + woff) = (uint64_t)wval; else *(uint32_t*)(b + woff) = (uint32_t)wval;
       printf("  写了 q%d +%d = %d (宽%d)\n", q, woff, wval, wwid);
-      if (getenv("THR")) dump_write_threads("前");
-      if (getenv("FK")) {            /* AIDL FMQ 是 futex 通知的（AshmemFutex），只改计数器不叫醒对方 */
-        size_t lim = getenv("WALL") ? g_qsz[q] : (size_t)64;
+      if (flag("THR")) dump_write_threads("前");
+      if (flag("FK")) {            /* AIDL FMQ 是 futex 通知的（AshmemFutex），只改计数器不叫醒对方 */
+        size_t lim = flag("WALL") ? g_qsz[q] : (size_t)64;
         int nw = 0;
         for (size_t t = 0; t + 4 <= lim; t += 4) {
-          *(uint32_t*)((char*)g_qmem[q] + t) = 1;     /* Futex::notify() 的语义：先置 1 再 WAKE */
+          if (getenv("FOFF") && (int)t == atoi(getenv("FOFF")))
+            *(uint32_t*)((char*)g_qmem[q] + t) = 1;   /* 只有事件字才允许被写 */
           syscall(SYS_futex, (char*)g_qmem[q] + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
           nw++;
         }
         printf("  FK: 对 q%d 的 %d 个字发了 FUTEX_WAKE\n", q, nw); fflush(stdout);
       }
       usleep((getenv("S") ? atoi(getenv("S")) : 1000) * 1000);
-      if (getenv("THR")) dump_write_threads("后");
+      if (flag("THR")) dump_write_threads("后");
       for (int i = 0; i < g_nq; i++) {
         uint8_t* b2 = (uint8_t*)g_qmem[i];
         printf("  后 q%d(fd %d) :", i, g_qfd[i]);
@@ -1029,12 +1032,12 @@ int auto_build(void* h) {
     uint8_t* cq = (uint8_t*)g_qmem[0];
     uint8_t* rq = (uint8_t*)g_qmem[1];
     uint64_t wcnt = *(uint64_t*)(cq + wo), rcnt = *(uint64_t*)(cq + (wo ? 0 : 8));
-    if (getenv("THR")) dump_write_threads("前");
+    if (flag("THR")) dump_write_threads("前");
     printf("  CMD: 命令队列 计数器+%d=%llu 另一侧=%llu  Reply@+16 前 56 字节:",
            wo, (unsigned long long)wcnt, (unsigned long long)rcnt);
     for (int t = 16; t < 72; t += 4) printf(" %d:%d", t, *(int32_t*)(rq + t));
     printf("\n");
-    if (getenv("CSLOT") && getenv("CSLOT")[0]) {                                  /* 另一种槽布局：[消息长度][tag] */
+    if (flag("CSLOT")) {                                  /* 另一种槽布局：[消息长度][tag] */
       *(int32_t*)(cq + 16) = 4;
       *(int32_t*)(cq + 20) = tag;
       printf("  CMD: 用 CSLOT 布局 [len=4][tag=%d]，计数器偏移待试\n", tag);
@@ -1051,15 +1054,13 @@ int auto_build(void* h) {
     syscall(SYS_futex, cq + foff, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
     syscall(SYS_futex, cq + wo, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
     printf("  CMD: 事件字 +%d 写成 1 并 WAKE\n", foff);
-    if (getenv("WALL"))
-      for (size_t t = 0; t + 4 <= g_qsz[0]; t += 4) {
-        *(uint32_t*)(cq + t) = 1;
+    if (flag("WALL"))      /* 只 WAKE，不改值 —— 改值会把刚写进去的命令/计数器全盖掉 */
+      for (size_t t = 0; t + 4 <= g_qsz[0]; t += 4)
         syscall(SYS_futex, cq + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
-      }
     printf("  CMD: 写了 tag=%d payload=%d，计数器 %llu -> %llu，并对事件字(+24)发 WAKE\n",
            tag, payload, (unsigned long long)wcnt, (unsigned long long)(wcnt + 1));
     usleep((getenv("S") ? atoi(getenv("S")) : 1500) * 1000);
-    if (getenv("THR")) dump_write_threads("后");
+    if (flag("THR")) dump_write_threads("后");
     printf("  CMD: 之后 命令队列 +%d=%llu +%d=%llu\n", wo,
            *(unsigned long long*)(cq + wo), wo ? 0 : 8, *(unsigned long long*)(cq + (wo ? 0 : 8)));
     printf("  CMD: Reply@+16:");

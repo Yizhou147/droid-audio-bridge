@@ -8,7 +8,7 @@ sleep 3
 echo "audioserver=$(getprop init.svc.audioserver)"
 logcat -c
 DBG=1 APC=1 APCPORT="$APCPORT" LOAD="$LOAD" GOT=1 AUTO=1 TRANSACT=1 STREAM=1 THR=1 \
-  CMD=2:0 CW="${CW:-8}" CSLOT="${CSLOT:-none}" FOFF="${FOFF:-24}" WALL="${WALL:-}" S="${S:-3000}" \
+  CMD=2:0 CW="${CW:-8}" CSLOT="${CSLOT:-}" FOFF="${FOFF:-24}" WALL="${WALL:-}" S="${S:-3000}" \
   SVC=android.hardware.audio.core.IModule/default \
   IN="55;1;8;0;0;L:2048;B;B" timeout 30 /data/local/tmp/argsloop > /data/local/tmp/stop.log 2>&1
 grep -a -E 'ACP3|LOAD|THR |CMD:|PFD@|q[0-9]|reply=|mmap' /data/local/tmp/stop.log | head -34
