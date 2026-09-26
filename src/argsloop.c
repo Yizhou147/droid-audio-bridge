@@ -1142,6 +1142,7 @@ int auto_build(void* h) {
           if (getenv("VPUNHDR") ? atoi(getenv("VPUNHDR")) : 1) N.Parcel_writeInt32(p, 1);
           N.Parcel_writeInt32(p, vidx);
           N.Parcel_writeInt32(p, vval);
+          N.Parcel_setPos(p, 0);      /* 不解码自己刚写到尾巴的 parcel（上一版没回卷 ⇒ 恒 -61） */
           static char vobj[256];
           memset(vobj, 0, sizeof vobj);
           int rs = ((int(*)(void*, const AParcel*))vrd)(vobj, p);
