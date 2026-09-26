@@ -717,6 +717,39 @@ int auto_build(void* h) {
     }
     fflush(stdout);
   }
+  /* CMD=<tag>[:<payload>] —— 按 AOSP StreamDescriptor.aidl 的权威布局发一条 FMQ 命令：
+   *   MQDescriptor.grantors = [u64 计数器A @0][u64 计数器B @8][元素区 @16][eventFlag u32]
+   *   Command 是 @FixedSize union（8 字节）：tag 序 = halReservedExit0 getStatus1 start2
+   *     burst3 drain4 standby5 pause6 flush7；Reply 是 56 字节。
+   * q0=command / q1=reply / q2=data（就是回包字段顺序）。读哪条计数器是 write 还没定，
+   * 用 CW=0|8 选，Reply 自己会告诉我们有没有被消费。 */
+  if (getenv("CMD") && g_nq >= 2) {
+    int tag = 2, payload = 0, wo = 8;                       /* 默认 start */
+    sscanf(getenv("CMD"), "%d:%d", &tag, &payload);
+    if (getenv("CW")) wo = atoi(getenv("CW"));
+    uint8_t* cq = (uint8_t*)g_qmem[0];
+    uint8_t* rq = (uint8_t*)g_qmem[1];
+    uint64_t wcnt = *(uint64_t*)(cq + wo), rcnt = *(uint64_t*)(cq + (wo ? 0 : 8));
+    printf("  CMD: 命令队列 计数器+%d=%llu 另一侧=%llu  Reply@+16 前 56 字节:",
+           wo, (unsigned long long)wcnt, (unsigned long long)rcnt);
+    for (int t = 16; t < 72; t += 4) printf(" %d:%d", t, *(int32_t*)(rq + t));
+    printf("\n");
+    *(int32_t*)(cq + 16) = tag;                             /* union tag */
+    *(int32_t*)(cq + 20) = payload;                         /* Void ⇒ 0；burst 等用它 */
+    *(uint64_t*)(cq + wo) = wcnt + 1;                       /* 生产者推进 */
+    syscall(SYS_futex, cq + 24, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+    syscall(SYS_futex, cq + wo, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+    printf("  CMD: 写了 tag=%d payload=%d，计数器 %llu -> %llu，并对事件字(+24)发 WAKE\n",
+           tag, payload, (unsigned long long)wcnt, (unsigned long long)(wcnt + 1));
+    usleep((getenv("S") ? atoi(getenv("S")) : 1500) * 1000);
+    printf("  CMD: 之后 命令队列 +%d=%llu +%d=%llu\n", wo,
+           *(unsigned long long*)(cq + wo), wo ? 0 : 8, *(unsigned long long*)(cq + (wo ? 0 : 8)));
+    printf("  CMD: Reply@+16:");
+    for (int t = 16; t < 72; t += 4) printf(" %d:%d", t, *(int32_t*)(rq + t));
+    printf("\n  （Reply 字段：status fmqByteCount | observable.frames/timeNs | "
+           "hardware.frames/timeNs | latencyMs xrunFrames state）\n");
+    fflush(stdout);
+  }
   hunt_fds("Return(平台解析后的结构)", ret, 512);
   hunt_fds("greply(抓到的原始回包)", g_greply, g_greply_len);
   AIBinder* stream = NULL;
