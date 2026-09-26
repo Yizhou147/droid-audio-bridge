@@ -1216,3 +1216,25 @@ AHAL_StreamOut_QTI: configure : completed in 116.872 ms [pal_stream_open: 53.9 m
    从容器读来的 PCM：容器 PipeWire monitor → `aa-feeder.sh` → TCP → argsloop 的 sink 分支。
 2. `hardware.frames=-1` 对放音不影响，但**时钟/延迟**要自己算：容器侧按 48000×2×4 的字节率投喂即可。
 3. 出声验证要用户点头（静音纪律）；能出声时第一件事是**低声单频短促测试**，不是放整首曲子。
+
+### 31.6 【18:5x】★快速投喂会"卡死"的根因：回包队列只有 **一个** 槽
+
+三队列几何（开局打印，`SESSION 几何` 行）：
+```
+cmd  映射 4096，元素 8 字节          data 映射 20480，环 16384，事件字 +16400
+rpy  映射 4096，元素 56 字节（容量=56 ⇒ 只有 1 个槽！）
+```
+原来 `SESSION` 发完 `burst` 就固定 `usleep` 再 `TAKE_REPLY`，**不看 availableToRead**：
+- 快节奏（5ms）下 HAL 还没写回包，我们就把 56 字节的读指针推过去了；
+- 下一次 HAL `writeBlocking` 按 `read + capacity - write` 算出"满" ⇒ **永久阻塞**；
+- 症状（计数器一眼可判）：`cmd 读` 冻在 16、`data 读` 冻在 1920、`rpy 写` 冻在 56，
+  而我们这边 `cmd 写`/`data 写` 一路涨。慢节奏（700ms）恰好躲过，所以 §31.3 那轮是绿的。
+
+正解（`wait_rpy_ms()`）：收包前等 `rq+8 >= rq+0+56`，**一问一答**；数据队列满时也只等不吃。
+⇒ 修完 TONE=440 的 22 轮全部 `消费=8192 state=3`，HAL 稳定追平写指针。
+
+顺带两条实测口径：
+- `Command::burst(N)` 我们发的是**字节数**，HAL 每轮就消费这么多并回 `fmqByteCount=N`
+  （单位是不是"帧"还没证伪：改成帧的 `BURSTFR=1` 旋钮留着）。
+- `Reply.observable.frames` 恒 0 / `hardware.frames` 恒 -1，但 `latencyMs=129` 是真算出来的；
+  也就是说**位置上报不可用**，容器侧的时钟/延迟得自己按字节率算（M3 要记着）。
