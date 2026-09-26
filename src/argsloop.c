@@ -704,7 +704,7 @@ int auto_build(void* h) {
         /* NOPRE=1：不带模板，交一份**自己填**的 AudioPortConfig（接管轮里框架 config 数为 0，
          * 只能自己来）。POKE=off:val[,off:val...] 直接往 C++ 结构的任意 int32 偏移写值 ——
          * HAL 会把收到的结构逐字段明文打回来，所以偏移对不对一眼可判，几轮就能试完。 */
-        if (getenv("NOPRE")) {
+        if (getenv("NOPRE") && atoi(getenv("NOPRE")) == 1) {
           static char my[512]; memset(my, 0, sizeof my);
           *(int32_t*)(my + 0) = 0;                     /* id = 0 ⇒ 新建 */
           *(int32_t*)(my + 4) = want;                  /* portId */
@@ -735,7 +735,7 @@ int auto_build(void* h) {
 
         }
         if (!sac) printf("  ACP: 没有 setAudioPortConfig 符号，跳过\n");
-        else if (!tmpl || getenv("NOPRE")) printf("  ACP: 模板法没命中（stride 反推失败）\n");
+        else if (!tmpl || (getenv("NOPRE") && atoi(getenv("NOPRE")) == 1)) printf("  ACP: 模板法没命中（stride 反推失败）\n");
         else {
           int oldid = *(int*)tmpl; (void)oldid;
           printf("  ACP: 模板=stride %d 里的 id=%d portId=%d ⇒ 克隆并清 id\n", stride, oldid, want); fflush(stdout);
