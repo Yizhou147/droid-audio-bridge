@@ -193,6 +193,34 @@ int main(int argc, char** argv) {
           fflush(stdout);
         }
       }
+      if (getenv("ARGS3")) {
+        /* 09-26 实锤：必须带 FLAG_ACCEPT_FDS，否则 openOutputStream 的回包（含 FMQ 的 fd）被驱动拒掉，
+         * 看到的 0x80000008 是假象；带上 0x10 后变成 -22＝读端"size<4"分支 ⇒ 怀疑请求**没有异常头**，
+         * 我多写的那个 0 被当成 size 读了。这里把形状做成矩阵一次扫清：
+         *   bit0=写异常头  bit1=写 size 信封  bit2=size 按"含自身"还是"仅后文" */
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        int (*wI64)(AParcel*, int64_t) = (void*)dlsym(N.h, "AParcel_writeInt64");
+        static const int body = 36;              /* A(4)+pres(4)+SM(12)+pres(4)+i64(8)+cb(4)+evcb(4) */
+        for (int m = 0; m < 8; m++) {
+          AParcel* in4 = NULL; AParcel* out4 = NULL;
+          if (N.Prepare(b, &in4) != 0) break;
+          if (m & 1) wI32(in4, 0);                                   /* 异常头 */
+          if (m & 2) wI32(in4, (m & 4) ? body : body + 4);           /* size 信封 */
+          wI32(in4, 0);                                              /* 字段 A */
+          wI32(in4, 1);                                              /* SourceMetadata presence */
+          wI32(in4, 12); wI32(in4, 1); wI32(in4, 0);                /* SM: size + head=1 + len=0 */
+          wI32(in4, 0);                                              /* offload presence=0 */
+          if (wI64) wI64(in4, 0); else { wI32(in4, 0); wI32(in4, 0); }
+          wI32(in4, 0); wI32(in4, 0);                                /* 两个可空 binder */
+          int s4 = N.Transact(b, 15, &in4, &out4, 0x10);
+          int32_t e4 = -1, h4 = -1;
+          if (out4) { N.Parcel_readInt32(out4, &e4); N.Parcel_readInt32(out4, &h4); }
+          printf("ARGS3 m=%d(ex=%d,size=%d,adj%d) st=%d ex=%d first=%#x %s\n", m,
+                 !!(m & 1), !!(m & 2), !!(m & 4), s4, e4, (unsigned)h4,
+                 (s4 == 0 && e4 == 0) ? "VERDICT-M1: 形状对了，流开成！" : "");
+          fflush(stdout);
+        }
+      }
       if (getenv("ARGS2")) {
         /* 09-25 反汇编设备自带 core-V2 的 OpenOutputStreamArguments::readFromParcel 得到的权威服务端布局：
          *   [size][i32 A][pres][SourceMetadata][pres][AudioOffloadInfo?][i64][IStreamCallback][IStreamOutEventCallback]
