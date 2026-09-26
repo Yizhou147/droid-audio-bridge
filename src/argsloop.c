@@ -65,6 +65,64 @@ int AIBinder_transact(AIBinder* binder, uint32_t code, AParcel** in, AParcel** o
   return r;
 }
 
+
+/* ===== GOT 钩子：不依赖符号插桩（那条被 bionic 的 NEEDED 查找顺序废掉，见 §21）=====
+ * 做法：在 core-V4-ndk.so 自己的映射里，搜出所有 8 字节槽 == 真 AIBinder_transact 地址的
+ * 位置（就是它的 GOT 槽），mprotect 后改成 my_tx。只动本进程内存，不碰任何文件/分区。 */
+static void* g_orig_tx;
+static int g_gotcap;
+static uint8_t g_greply[8192];
+static int g_greply_len;
+static AIBinder* g_gstream;
+static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32_t flags) {
+  int (*o)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) =
+    (int (*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))g_orig_tx;
+  int r = o(b, code, in, out, flags);
+  if (g_gotcap && code == 15 && r == 0 && out && *out) {
+    AParcel* op = *out;
+    g_greply_len = 0;
+    spill(op, g_greply, sizeof g_greply, &g_greply_len);
+    int (*rb)(const AParcel*, AIBinder**) =
+      (int (*)(const AParcel*, AIBinder**))dlsym(N.ndk, "AParcel_readStrongBinder");
+    int (*ri)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
+    int32_t ex = -1;
+    if (ri) ri(op, &ex);
+    if (rb) { AIBinder* st = NULL; if (rb(op, &st) == 0 && st) g_gstream = st; }
+    printf("  [GOT] reply=%d 字节 ex=%d stream=%p\n", g_greply_len, ex, (void*)g_gstream);
+    fflush(stdout);
+  }
+  return r;
+}
+static int install_got_hook(const char* modpath, void* real) {
+  FILE* f = fopen("/proc/self/maps", "r");
+  if (!f) return -1;
+  char line[512];
+  int n = 0;
+  unsigned long cnt[64];
+  unsigned long szs[64];
+  while (fgets(line, sizeof line, f)) {
+    unsigned long a, b2; char perm[8];
+    if (sscanf(line, "%lx-%lx %4s", &a, &b2, perm) != 3) continue;
+    if (!strstr(line, modpath)) continue;
+    if (!(perm[0] == 'r')) continue;
+    n = 0;
+    for (unsigned long o = a; o + 8 <= b2 && n < 64; o += 8) {
+      void* v = *(void**)o;
+      if (v == real) cnt[n] = o, szs[n] = b2 - a, n++;
+    }
+    if (n) {
+      for (int i = 0; i < n; i++) {
+        unsigned long pg = cnt[i] & ~0xfffUL;
+        if (mprotect((void*)pg, 0x2000, PROT_READ | PROT_WRITE) != 0) { printf("  [GOT] mprotect 失败@%lx\n", cnt[i]); continue; }
+        *(void**)cnt[i] = (void*)my_tx;
+        printf("  [GOT] 打桩槽 @%lx（映射 %lx-%lx）\n", cnt[i], a, b2); fflush(stdout);
+      }
+    }
+  }
+  fclose(f);
+  return 0;
+}
+
 static void noop_create(void* a) { (void)a; }
 static void noop_destroy(void* a) { (void)a; }
 static int32_t noop_transact(AIBinder* b, uint32_t c, const void* in, void* out) {
@@ -200,8 +258,35 @@ int main(int argc, char** argv) {
   CtorBp(bp, &b);
   static char ret[2048]; memset(ret, 0, sizeof ret);
   static char sret[32]; memset(sret, 0, sizeof sret);
+  if (getenv("GOT")) {
+    g_orig_tx = (void*)dlsym(N.ndk, "AIBinder_transact");
+    printf("GOT 钩子安装：real=%p\n", g_orig_tx); fflush(stdout);
+    install_got_hook("android.hardware.audio.core-V4-ndk.so", g_orig_tx);
+    g_gotcap = 1;
+  }
   if (getenv("CAP")) { g_cap = 1; }
   call_sret3(openOut, bp, args, ret, sret);
+  if (getenv("GOT")) {
+    g_gotcap = 0;
+    printf("GOT 结果: stream=%p reply=%d\n", (void*)g_gstream, g_greply_len); fflush(stdout);
+    int (*rfd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
+    AParcel* cin = NULL; AParcel* cout = NULL;
+    int (*Prep2)(AIBinder*, AParcel**) = (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
+    int (*Tx2)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) = (int(*)(AIBinder*,uint32_t,AParcel**,AParcel**,uint32_t))g_orig_tx;
+    if (g_gstream && Prep2 && Tx2 && !Prep2(g_gstream, &cin)) {
+      N.Parcel_writeInt32(cin, 0);
+      int s3 = Tx2(g_gstream, 1, &cin, &cout, 0x10);
+      size_t sz3 = cout ? N.Parcel_dataSize(cout) : 0;
+      printf("GOT2 getStreamCommon st=%d reply=%zu\n", s3, sz3); fflush(stdout);
+      if (s3 == 0 && cout) {
+        for (int pos = 0; pos + 4 <= (int)sz3; pos += 4) {
+          int fd = -1;
+          N.Parcel_setPos(cout, pos);
+          if (rfd && rfd(cout, &fd) == 0 && fd >= 0 && fd < 4096) { printf("  FMQ fd@%d = %d\n", pos, fd); fflush(stdout); }
+        }
+      }
+    }
+  }
   if (getenv("CAP")) {
     g_cap = 0;
     printf("CAP 完成: stream=%p reply=%d 字节\n", (void*)g_stream, g_reply_len); fflush(stdout);
