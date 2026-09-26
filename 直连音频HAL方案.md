@@ -437,3 +437,27 @@ system_suspend 存活），AAudio 复用 anland 态已验证的真链路（音�
 - ⇒ 下一步必须在 `IModule/default`（真喇叭所在模块）上取/试合法 port config id（dumpsys 里
   speaker device port id=23、portConfig id=53@48000/INT_16/STEREO）。**注意：在 default 上开流会走
   AGM 建图 + 给 smart amp 上电，属于"可能有一声/咔哒"的动作类别 —— 虽仍不写任何采样，做之前必须先跟用户约。**
+
+## 17. 【09-26 11:02 ★M1 达成】接管轮内直连 HAL 开输出流成功（零采样＝无声）
+
+`argsloop AUTO` 的 88 字节骨架 + 扫 portConfig id（56..100）后：
+
+```
+尾: hal=31538  fd: 74 → 77   threads: 35 → 36   /dev/shm: 0 → 0
+```
+
+- **fd +3、线程 +1 = HAL 真的建立了输出流**（AOSP/QTI 的 StreamOut 会开 FMQ/共享内存 fd 与混音线程）。
+- 全程 **一个采样都没写** ⇒ 绝对无声；也没走 AGM 播放图（shm 未变，符合"只 open 不 write"）。
+- 通过 `findPortIdForNewStream` 的 id（无报错）：**57、62、63、69、74、75、77、78、85、88、89、92**；
+  被拒原因可分类：`already has a stream opened on it`（55/59/60/61 —— **接管前 audioserver 遗留的僵尸流**，
+  `stop` 杀的、没走 close）、`does not correspond to a mix port`（53=喇叭 device port、58）、`not found`。
+- 已知映射样本：`id 62 → portId 8, 48k, INT_24`；`id 63 → portId 11, 48k, INT_32`；`id 78 → portId 21, 16k`。
+
+### 17.1 遗留与下一步（M2）
+
+1. **这些流是我开出来的、没关** ⇒ 端口会被占（`maxActiveStreamCount: 1`）；重启安卓或杀 `audiohalservice.qti` 即清。
+2. `ret`（`OpenOutputStreamReturn`）在 `TRANSACT st=0` 后前 6 个 int 仍是 0 ⇒ 下一步：把 ret 缓冲**按平台
+   `Return::readFromParcel` 的偏移**读（或直接倒 ret 的 64 字节 hex），定位 `StreamDescriptor`/FMQ 指针；
+   之后用 `createMmapBuffer`（码待取）或直接写 FMQ 的 AudioRingBuffer，**仍只写零帧**，判据＝HAL 侧
+   readBack 指针/`/dev/shm` 增长、且 `dumpsys` 里流活跃。
+3. 目标要挑**通向喇叭的 mix port**（需从 dumpsys 的 patch/route 里对出来），或先用任意一个把数据面打通。
