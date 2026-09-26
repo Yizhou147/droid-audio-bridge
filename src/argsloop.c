@@ -69,7 +69,8 @@ static void dumpInts(const char* tag, const uint8_t* b, int len) {
 }
 
 int main(int argc, char** argv) {
-  const char* in = getenv("IN") ? getenv("IN") : "0";
+  char* in0 = strdup(getenv("IN") ? getenv("IN") : "0");
+  char* in = in0;
   N.ndk = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_GLOBAL);
   if (!N.ndk) { fprintf(stderr, "dlopen ndk: %s\n", dlerror()); return 2; }
   N.Parcel_create = (AParcel* (*)(void))dlsym(N.ndk, "AParcel_create");
@@ -77,6 +78,10 @@ int main(int argc, char** argv) {
   N.Parcel_setPos = (int32_t(*)(AParcel*, int32_t))dlsym(N.ndk, "AParcel_setDataPosition");
   N.Parcel_readByte = (int32_t(*)(const AParcel*, int8_t*))dlsym(N.ndk, "AParcel_readByte");
   N.Parcel_writeInt32 = (int32_t(*)(AParcel*, int32_t))dlsym(N.ndk, "AParcel_writeInt32");
+  int (*writeBinder)(AParcel*, AIBinder*) =
+    (int (*)(AParcel*, AIBinder*))dlsym(N.ndk, "AParcel_writeStrongBinder");
+  int (*writeI64)(AParcel*, int64_t) = (int (*)(AParcel*, int64_t))dlsym(N.ndk, "AParcel_writeInt64");
+  (void)writeBinder; (void)writeI64;
   if (!N.Parcel_create || !N.Parcel_dataSize || !N.Parcel_setPos || !N.Parcel_readByte ||
       !N.Parcel_writeInt32) { fprintf(stderr, "libbinder_ndk 符号缺\n"); return 3; }
 
@@ -92,12 +97,16 @@ int main(int argc, char** argv) {
   /* 1) 造请求 parcel */
   AParcel* p = N.Parcel_create();
   int cnt = 0;
-  for (char *s = in, *e; s && *s; s = e ? e + 1 : NULL) {
-    long v = strtol(s, &e, 0);
-    N.Parcel_writeInt32(p, (int32_t)v);
+  /* SPEC 语法：整数（可 0x…）= 一个 int32；"B" = 一个 null strong binder（24B flat 对象，
+   * 平台真值里那两个回调槽就是它）；"L" = int64 0。⇒ 纯数据即可复刻 88B 骨架，不用每试一次跑 CI。 */
+  for (char* tok = strtok(in, ","); tok; tok = strtok(NULL, ",")) {
+    if (!strcmp(tok, "B")) { if (writeBinder) writeBinder(p, NULL); else N.Parcel_writeInt32(p, 0); }
+    else if (!strcmp(tok, "L")) { if (writeI64) writeI64(p, 0);
+                                 else { N.Parcel_writeInt32(p, 0); N.Parcel_writeInt32(p, 0); } }
+    else N.Parcel_writeInt32(p, (int32_t)strtol(tok, NULL, 0));
     cnt++;
-    if (!e || !*e) break;
   }
+  free(in0);
   printf("IN: %d 个词\n", cnt); fflush(stdout);
 
   /* 2) 平台读端当裁判 */

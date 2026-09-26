@@ -401,3 +401,23 @@ A 路（直连 HAL）不受此影响：HAL 在轮里本来就活着且可服务�
     `EX_SERVICE_SPECIFIC`（`0x80000000|8` 正是它的编码）。
 下一步（便宜且判据明确）：**先问 `getInterfaceVersion` 与 `getInterfaceHash`**（码 0xFEFFFFFF / 0xFEFFFFFE，
 都是零参数、无 fd），把 (i) 钉死；若版本不是 2，就直接按真实版本的 Arguments 重排。
+
+## 15. 【09-26 决策】直连 HAL 方向**放弃**（成本实测），改走"不让 stop 杀音频栈"
+
+A 路做到底的成本被实测钉死：
+- `argsdump` 拿到平台真值：args 块 **88 字节**，其中两个回调槽是 **24 字节的 `flat_binder_object`**（不是 int）
+  ⇒ 解释了我七种手搓形状全同码（`0x80000008`）的原因：块长与对象槽都不对。
+- `hp-open`（构造平台 `BpModule` + x8 sret 垫片直调 `openOutputStream`）**事务成功**：`st=0`、无异常，
+  `getAudioPorts` 自检证明 Bp 对象与 sret 处理可信（vector 被真实填出 1200B）。
+- **但什么都没发生**：HAL 线程 35→35、fd 74→74、`/dev/shm` 0→0、`ret` 全零 ⇒ 全零 config 被实现
+  静默走"返回空对象"的路径。要真开流必须在 C++ 里构造**嵌套 parcelable 真实对象**
+  （AudioConfig→AudioPortConfig→AudioPort→`std::vector`/`std::string`/`sp<>`），等于自己实现半个
+  `libaudiohal`。加上数据面还要自己写 AudioRingBuffer/FMQ。
+⇒ 用户拍板：**不再走这条路**。A 的探索工具（argsdump/hp-open/argsloop）留在仓库里当证据与备用，
+  不再为它跑 CI。
+
+B 路的真实障碍也记清楚（§14）：**整颗 `stop` 之后 `hwservicemanager`/`system_suspend` 按名拉不回来**，
+所以"轮内冷启动整套框架"不可能完备 ⇒ 唯一可行形态是**根本别 stop 它们**：
+把 `desk-takeover.sh` 的 `run "stop"` 换成按需逐个停（至少保 audioserver / hwservicemanager /
+system_suspend 存活），AAudio 复用 anland 态已验证的真链路（音量/路由/蓝牙全带）。
+风险＝漏停某服务（当初用整颗 stop 就是为了干净），需实跑一轮定判据；备份 `desk-takeover.sh.bak-0926-audio`。
