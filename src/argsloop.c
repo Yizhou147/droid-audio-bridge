@@ -135,7 +135,27 @@ static void load_maps(void) {
   }
   fclose(f);
 }
+/* 在一个 AIDL Bp 对象里找真句柄：某个 word 的 vptr 属于 libbinder*（即 AIBinder 的实现类）。
+ * 不猜成员偏移 —— BpStreamOut 的句柄实测在 obj+32，猜 +8 拿到的是引用计数。 */
+static int readable(void* p);
+static void* find_binder_in(void* obj, const char* tag) {
+  if (!readable(obj)) { printf("  %s: 对象不可读 %p\n", tag, obj); fflush(stdout); return NULL; }
+  for (int k = 0; k < 24; k++) {
+    void* w = *(void**)((char*)obj + 8 * k);
+    if (!readable(w)) continue;
+    Dl_info dw = {0};
+    if (dladdr(*(void**)w, &dw) && dw.dli_fname &&
+        (strstr(dw.dli_fname, "libbinder") || (dw.dli_sname && strstr(dw.dli_sname, "BpBinder")))) {
+      printf("  %s: AIBinder 在 obj+%d = %p（vptr 在 %s）\n", tag, 8 * k, w,
+             strrchr(dw.dli_fname, '/') + 1); fflush(stdout);
+      return w;
+    }
+  }
+  printf("  %s: 对象里没找到 libbinder 句柄\n", tag); fflush(stdout);
+  return NULL;
+}
 static int g_nrd;
+
 static int readable(void* p) {
   unsigned long v = (unsigned long)p & ((1UL << 48) - 1);   /* 去掉 scudo/MTE 的顶层 tag */
   int res = 0;
@@ -636,7 +656,51 @@ int auto_build(void* h) {
         N.Parcel_setPos(out3, 0);
         int (*rI)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
         if (rI) rI(out3, &e3);
-        printf("  reply ex=%d\n", e3);
+        printf("  reply ex=%d\n", e3); fflush(stdout);
+        if (getenv("MMAP")) {
+          /* IStreamCommon::createMmapBuffer = 码 8（从 BpStreamCommon 的 AIDL 声明序数出来）。
+           * 拿它的 fd 就能 mmap 出一块和 HAL 共享的环形区 —— 不依赖 FMQ 协议就有数据通道。 */
+          int (*readSC)(void*, const AParcel*) = (int(*)(void*, const AParcel*))dlsym(h,
+            "_ZN4aidl7android8hardware5audio4core13IStreamCommon14readFromParcelEPK7AParcelPNSt3__110shared_ptrIS4_EE");
+          if (!readSC) printf("  MMAP: 缺 IStreamCommon::readFromParcel 符号\n");
+          else {
+            static char scbuf[64]; memset(scbuf, 0, sizeof scbuf);
+            N.Parcel_setPos(out3, 0);
+            int rrc = readSC(scbuf, out3);
+            void* scp = *(void**)scbuf;
+            printf("  MMAP: readFromParcel rc=%d obj=%p\n", rrc, scp); fflush(stdout);
+            void* scb = find_binder_in(scp, "BpStreamCommon");
+            if (scb) {
+              AParcel* i4 = NULL; AParcel* o4 = NULL;
+              int (*rI2)(const AParcel*, int32_t*) =
+                (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
+              for (int fk = 0; fk < 2; fk++) {           /* 0x10=ACCEPT_FDS，被拒（-22）则退回 0 */
+                uint32_t flags = fk ? 0 : 0x10;
+                i4 = NULL; o4 = NULL;
+                if (Prep2((AIBinder*)scb, &i4)) break;
+                N.Parcel_writeInt32(i4, 0);
+                N.Parcel_writeInt32(i4, 2048);           /* minSizeFrames */
+                int s4 = Tx2((AIBinder*)scb, 8, &i4, &o4, flags);
+                size_t sz4 = o4 ? N.Parcel_dataSize(o4) : 0;
+                int32_t e4 = -1;
+                if (o4 && rI2) { N.Parcel_setPos(o4, 0); rI2(o4, &e4); }
+                printf("  createMmapBuffer(8) flags=%#x st=%d reply=%zu ex=%d\n", flags, s4, sz4, e4);
+                fflush(stdout);
+                for (int pos = 4; o4 && pos + 4 <= (int)sz4; pos += 4) {
+                  int fd = -1;
+                  N.Parcel_setPos(o4, pos);
+                  if (rFd && rFd(o4, &fd) == 0 && fd >= 0 && fd < 4096)
+                    { printf("  MMAP_PFD@%d = %d\n", pos, fd); fflush(stdout); }
+                  int f2 = -1;
+                  N.Parcel_setPos(o4, pos);
+                  if (rFd2 && rFd2(o4, &f2) == 0 && f2 >= 0 && f2 < 4096)
+                    { printf("  MMAP_RAWFD@%d = %d\n", pos, f2); fflush(stdout); }
+                }
+                if (s4 == 0 && sz4 > 4) break;
+              }
+            }
+          }
+        }
         for (int pos = 4; pos + 4 <= (int)sz3; pos += 4) {
           int fd = -1;
           int rr = rFd ? (N.Parcel_setPos(out3, pos), rFd(out3, &fd)) : -1;
