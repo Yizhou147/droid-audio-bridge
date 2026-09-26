@@ -1397,3 +1397,97 @@ audioserver 复活）——**是否现在交还由用户决定**。
 - **事故**：我把实时 anland 音频(#63, 视频正以最大音量放)灌进无音量控制的直连 sink → 顶格炸响、无法关小 → 用户强启。已写《工作总结》§7 音频红线。教训：诊断只用内部小 AMP 的 `TONE`/zero，读日志优先，出声前单独请示。
 - **仍待证的头号假设**：框架放视频走 **LOW_LATENCY(io13,type1)**，我们走 **DEEP_BUFFER(type2)**，PAL 层其它参数(getDeviceConfig ch4 / isChannelSupported 2 / Multi channel speaker / hw_ep ch4)**两边一致** ⇒ 差异可能在 usecase 的 AGM 图（low_latency 的 speaker 图带立体声→4功放分配，deep_buffer 的可能没有）。
 - 已备好 `out/dump/mix1_lowlatency.bin`（portId 1 的 AudioPortConfig 线节，src id 54）+ 扬声器 dev23.bin/patch0.bin，可在**安全方式**下验 low_latency 是否补齐四喇叭。
+
+---
+
+## 38. 四喇叭"右声道不响"根因＝PAL device rotation 没人推（09-26 22:1x 定案）
+
+### 38.1 先推翻 §37/§37.3 的两条假设
+用 adb 驱动 Bilibili 真放视频，抓框架自己那条流的开流日志，和我们直连那条逐字段 diff：
+
+| 字段 | 框架（Bilibili 播放） | 我们（直连 HAL） |
+|---|---|---|
+| usecase | `LOW_LATENCY_PLAYBACK` IoHandle 13, pal type 1 | 同（low_latency 试）/ deep_buffer |
+| backend | `TDM-LPAIF-RX-SECONDARY` | 同 |
+| `SP_Dev_Map` | `Left_Right` | 同 |
+| DevicePP `0xd2000000` | `0x0`（`populateDevicePPCkv: Entered default d2000000 0`） | 同 |
+| `0xa4000000` | `0xf` | 同 |
+| DevicePP | `DevicePP_Rx=Audio_MIPLAY`，**非 tunnel** | 同 |
+| getDeviceConfig | `channels 4 sr 48000 bw 32 fmt 23` | 同 |
+| FSM 功放监控 | `FSM_AMP_ON` / `fsm_audioreach_monitor_start` | 同 |
+
+⇒ **"框架走 tunnel / 我们少要了 DevicePP 校准"、"usecase 图不同"两条假设都不成立。**
+（另：`com.anland.consumer` 自己那条 low_latency 流也是同一套元数据。）
+
+### 38.2 真正实测到的唯一差异
+```
+框架:  PAL: Session: handleDeviceRotation: misound device rotation 1
+我们:  PAL: Session: handleDeviceRotation: misound device rotation 0
+```
+2→4 的分配正是这个参数下发的，完整链（从我们自己的日志里抠出来的原始序列）：
+
+```
+MiAudioService: onRotationUpdate, receiveRotationChanged
+AudioFlingerImpl: setGameParameters keyvalue: rotation=90
+DeviceHalAidl: setParameters: "rotation=90"
+  → pal_set_param(param id 10 = PAL_PARAM_ID_DEVICE_ROTATION)
+  → ResourceManager::setParameter: Device Rotation :1
+  → handleDeviceRotationChange: Device Got 3 with channel 4 / Device is Stereo/Quad Speaker
+  → 对每条在开的流: StreamPCM::setParameters → SessionAlsaPcm::setTKV(tag 0xc00003b)
+  → ResourceManager::SetOrientationCal
+```
+**接管轮里 audioserver/MiAudioService 是死的，没人推 rotation**，HAL 进程重启后它停在 0
+（= 竖屏语义）⇒ 四声道分配退化。这就是"只有一边响"的根因。
+
+### 38.3 耳朵 A/B（正常安卓态，容器 Pulse → audioserver → 同一条 HAL 链）
+同一个 15.6s 信号（静音→只左→静音→只右→静音→左右同相，两轮，440/660Hz）：
+- **rotation=0 开的新流**：用户描述"上下切换，一次左上加右上，一次左下加右下" ⇒ L/R 被分到**两条边**。
+- **rotation=1 开的新流**：单独放"只右 4s → 静音 → 只左 4s"，用户确认**"确实是先右再左"** ⇒ 正确的左右成对。
+- 中途翻 rotation（流已开着）用户说"没变化" ⇒ 映射在**开流时**定型，改值只影响后续流；
+  不过日志显示 `Rotation for stream 1/2` + `setTKV` 确实对活流下发了，所以不是完全无效，只是听不出来。
+
+### 38.4 修法（已实现）
+`IModule::updateScreenRotation` = **事务码 29**（完整码表见 §38.6）。argsloop 里在
+`call_sret3(openOut,…)` **之前**发，所以 `halsink.sh`/`connect.sh` 现在默认 `ROT=1`：
+```
+ROT=1 ROTONLY=1 … argsloop      # bin/halrot.sh <n>：只发调用不开流、不出声（静默验证用）
+```
+实测我们自己的进程发出去 HAL 完全认：`st=0 ex=0`，PAL 立刻
+`pal_set_param id 10 → handleDeviceRotationChange → SetOrientationCal`。
+值：0=竖 1=横90 2=180 3=270。**接管轮里桌面固定横屏 ⇒ 1；用户物理翻转要跟着改**（待办）。
+
+### 38.5 顺手拿到的可复用探针/判据
+- 4 只功放 = i2c-0 上 `foursemi,fs16xx` @0x34/0x35/0x36/0x37，ASoC 只注册**一个**聚合组件
+  `fs16xx.0-0034`（DAI `fs16xx-aif`），所以没有"每只喇叭"的独立 DAPM。
+- 判"功放到底开没开"用 debugfs（本机挂载点在 `/dev/tpcpmkeb/anuojued`）：
+  `…/asoc/sun-mtp-snd-card/fs16xx.0-0034/dapm/{AIF Playback,bias_level}`（空闲时 `Off`）。
+- 功放场景是**单值**控件，`tinymix` 可读：`FSM_Scene/FSM_Volume/FSM_Stop/FSM_AMP_ON/FSM_Rotation/…`；
+  `mixer_paths_sun_mtp.xml` 里 `speaker-tl/tr/bl/br` 分别写 `FSM_Scene=7/9/11/13`、`Vol=235`。
+- `libaudiocorehal.qti.so` 的 `MiStreamOutPrimary::configure()` 里有一张**声区表**：
+  index 1..6 → `speaker-top/bot/tl/tr/bl/br`（`qti::audio::core::MiStreamOutPrimary::configure`，
+  字符串 vaddr 0x468fe/0x52c8a/0x4fa67/0x473a9/0x496ee/0x4bbe9）。本机
+  `persist.vendor.audio.misound.disable=true`、`ro.vendor.audio.debug.pa.num=4`、
+  `ro.vendor.audio.spk.stereo=true`。
+- **电平教训**：第一次框架侧测试完全没听见 —— 容器 sink 25% × 信号 -20dBFS × 安卓 95/160
+  ≈ -36dBFS。要出声测就 sink 100% + 信号 0.25 左右（≈ 正常视频响度）。
+
+### 38.6 IModule 事务码全表（从设备自己的 core-V2-ndk.so 反汇编得到，别猜）
+```
+1 setModuleDebug  2 getTelephony  3 getBluetooth  4 getBluetoothA2dp  5 getBluetoothLe
+6 connectExternalDevice  7 disconnectExternalDevice  8 getAudioPatches  9 getAudioPort
+10 getAudioPortConfigs  11 getAudioPorts  12 getAudioRoutes  13 getAudioRoutesForAudioPort
+14 openInputStream  15 openOutputStream  16 getSupportedPlaybackRateFactors  17 setAudioPatch
+18 setAudioPortConfig  19 resetAudioPatch  20 resetAudioPortConfig  21/22 get/setMasterMute
+23/24 get/setMasterVolume  25/26 get/setMicMute  27 getMicrophones  28 updateAudioMode
+29 updateScreenRotation  30 updateScreenState  31 getSoundDose  32 generateHwAvSyncId
+33 getVendorParameters  34 setVendorParameters  35/36 add/removeDeviceEffect
+37 getMmapPolicyInfos  38 supportsVariableLatency  39 getAAudioMixerBurstCount
+40 getAAudioHardwareBurstMinUsec  41 prepareToDisconnectExternalDevice
+```
+取码方法（可复用）：`objdump -d -C` 设备自己的 `*-V2-ndk.so`，在 `BpModule::<m>` 里找
+`mov w1,#N` → `bl AIBinder_transact`。
+
+### 38.7 待验（本轮正在跑）
+接管轮里：① 日志确认我们开流时 `misound device rotation 1`；② `bin/pan-feed.sh` 喂
+只左/只右裸流（-22dBFS，16s 自停），确认右段真在右边。取证脚本 `bin/verify-rot-round.sh`
+（setsid 脱终端，写 `logs/rot-round.log`，因为进轮会把本会话的 pty 带走）。

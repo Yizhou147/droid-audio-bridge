@@ -10,7 +10,7 @@ ROT="${1:-1}"
 D=/data/local/tmp
 [ -x "$D/argsloop" ] || { echo "缺 $D/argsloop（CI 产物 push 上来）" >&2; exit 3; }
 ROT="$ROT" ROTONLY=1 \
-  AUTO=1 TRANSACT=1 STREAM=1 GOT=1 \
+  AUTO=1 TRANSACT=1 GOT=1 \
   SVC=android.hardware.audio.core.IModule/default \
   IN="55;1;8;0;0;L:2048;B;B" \
   exec "$D/argsloop"

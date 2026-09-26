@@ -1104,6 +1104,79 @@ int auto_build(void* h) {
       }
       fflush(stdout);
     }
+    /* VPNEW=1：get 是只写的（实测回空 vector），所以对象改由"手搓线节 + 平台自己 readFromParcel"
+     * 得到 —— 和 AudioPatch 一个套路。线节：
+     *   [int32 statusHeader=1][int32 objectSize][int32 idLen][id 字符按 4 对齐]
+     *   [int32 unionHeader=1][int32 unionIndex][payload int32]
+     * objectSize 到底写几个 4 字节是猜不出来的，用 VPOBJS="8,2,16,4" 逐个试，谁让
+     * readFromParcel 返回 0 且 writeToParcel 回环一致就是谁。 */
+    if (flag("VPNEW")) {
+      void* vrd = dlsym(h, "_ZN4aidl7android8hardware5audio4core15VendorParameter14readFromParcelEPK7AParcel");
+      void* vwr = dlsym(h, "_ZNK4aidl7android8hardware5audio4core15VendorParameter13writeToParcelEP7AParcel");
+      const char* vid = getenv("VPID") ? getenv("VPID") : "audio_volume_stream_music_device_speaker";
+      int vval = getenv("VPVAL") ? atoi(getenv("VPVAL")) : 0;
+      int vidx = getenv("VPINDEX") ? atoi(getenv("VPINDEX")) : 1;   /* 0=bool 1=int 2=float 3=string */
+      printf("  VPNEW: read=%p write=%p id=\"%s\" val=%d idx=%d\n", vrd, vwr, vid, vval, vidx);
+      if (vrd) {
+        char objs[64]; strncpy(objs, getenv("VPOBJS") ? getenv("VPOBJS") : "8,2,16,4,12", sizeof objs - 1);
+        objs[sizeof objs - 1] = 0;
+        size_t idl = strlen(vid);
+        size_t idpad = (idl + 4) & ~(size_t)3;
+        char* w = strtok(objs, ",");
+        while (w) {
+          int osz = atoi(w);
+          AParcel* p = N.Parcel_create();
+          N.Parcel_writeInt32(p, 1);
+          N.Parcel_writeInt32(p, osz);
+          N.Parcel_writeInt32(p, (int32_t)idl);
+          for (size_t t = 0; t < idpad; t += 4) {
+            int32_t chunk = 0;
+            if (t < idl) memcpy(&chunk, vid + t, idl - t >= 4 ? 4 : idl - t);
+            N.Parcel_writeInt32(p, chunk);
+          }
+          N.Parcel_writeInt32(p, 1);
+          N.Parcel_writeInt32(p, vidx);
+          N.Parcel_writeInt32(p, vval);
+          static char vobj[256];
+          memset(vobj, 0, sizeof vobj);
+          int rs = ((int(*)(void*, const AParcel*))vrd)(vobj, p);
+          printf("  VPNEW: objectSize=%d read st=%d\n", osz, rs);
+          if (rs == 0) {
+            printf("  VPNEW obj:");
+            for (int q = 0; q + 8 <= 96; q += 8) printf(" +%d=0x%016llx", q, (unsigned long long)*(uint64_t*)(vobj + q));
+            printf("\n");
+            for (int q = 0; q + 8 <= 96; q += 8) {
+              void* cand = *(void**)(vobj + q);
+              if (!readable(cand)) continue;
+              char* cs = (char*)cand; int ok = 1;
+              for (int t = 0; t < 48 && cs[t]; t++) if ((unsigned char)cs[t] < 0x20 || (unsigned char)cs[t] > 0x7e) { ok = 0; break; }
+              if (ok && cs[0]) printf("      +%2d 指针 %p -> \"%s\"\n", q, cand, cs);
+              else { int* ip = (int*)cand; if (readable(ip + 1)) printf("      +%2d 指针 %p -> [%d,%d]\n", q, cand, ip[0], ip[1]); }
+            }
+            if (vwr) {
+              AParcel* p2 = N.Parcel_create();
+              int ws2 = ((int(*)(const void*, AParcel*))vwr)(vobj, p2);
+              static uint8_t rb2[256]; int rl2 = 0;
+              N.Parcel_setPos(p2, 0); spill(p2, rb2, sizeof rb2, &rl2);
+              printf("  VPNEW write st=%d 回环 %d 字节:", ws2, rl2);
+              for (int t = 0; t + 4 <= rl2; t += 4) printf(" %d", *(int*)(rb2 + t));
+              printf("\n");
+            }
+            /* 把这个对象挂到 out vector 上，后面 VPPOKE/VPSEND 复用同一条路。
+             * Bp 侧算 count 用的是 (end-begin)/sizeof(VendorParameter)，所以 stride 要 >= 真 sizeof
+             * 且除完还得是 1 —— 默认 64（真值多半 56/64），要试别的用 VPSTRIDE 覆盖。 */
+            int vst = getenv("VPSTRIDE") ? atoi(getenv("VPSTRIDE")) : 64;
+            *(void**)(ov + 0) = (void*)&vobj[0];
+            *(void**)(ov + 8) = (void*)&vobj[0] + vst;
+            *(void**)(ov + 16) = *(void**)(ov + 8);
+            printf("  VPNEW: 已挂到 out vector（stride %d）\n", vst);
+            break;
+          }
+          w = strtok(NULL, ",");
+        }
+        fflush(stdout);
+      }
+    }
     char* vp1 = getenv("VPPOKE");
     if (vp1 && *(char**)(ov + 0)) {
       char* w = strtok(vp1, ",");
