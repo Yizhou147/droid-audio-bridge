@@ -590,7 +590,28 @@ int auto_build(void* h) {
     AParcel* in3 = NULL; AParcel* out3 = NULL;
     printf("  cand ret+%d=%p vptr=%p<-%s:%s +8=%p\n", off, cand, vptr, vf,
            hv && dv.dli_sname ? dv.dli_sname : "?", maybe); fflush(stdout);
-    if (getenv("DBG")) { printf("  候选 %p：跳过实际事务（DBG）\n", maybe); continue; }
+    if (getenv("OBJS") && !(hv && dv.dli_sname && strstr(dv.dli_sname, "BpStreamOut"))) continue;
+    /* BpInterface 的成员偏移不猜：对象里"某个 word 的 vptr 属于 libbinder*（即 AIBinder 实现
+     * 如 ACppBpBinder）"才是真句柄。扫前 24 个 word 找它。 */
+    if (hv && dv.dli_sname && strstr(dv.dli_sname, "BpStreamOut")) {
+      for (int k = 0; k < 24; k++) {
+        void* w = *(void**)((char*)cand + 8 * k);
+        if (!readable(w)) continue;
+        Dl_info dw = {0};
+        int hw = dladdr(*(void**)w, &dw);
+        const char* wf = hw && dw.dli_fname ? strrchr(dw.dli_fname, '/') + 1 : "-";
+        printf("  obj+%d=%p vptr=%p<-%s:%s\n", 8 * k, w, *(void**)w, wf,
+               hw && dw.dli_sname ? dw.dli_sname : "?");
+        if (hw && dw.dli_fname && (strstr(dw.dli_fname, "libbinder") || strstr(dw.dli_sname ? dw.dli_sname : "", "BpBinder"))) {
+          g_gstream = (AIBinder*)w;
+          printf("  ==> AIBinder 候选在 obj+%d\n", 8 * k);
+          break;
+        }
+      }
+      fflush(stdout);
+    }
+    if (g_gstream) maybe = (void*)g_gstream;       /* 对象里认出来的句柄优先 */
+    if (getenv("OBJS")) continue;                  /* OBJS=1：只看布局，一个事务都不发 */
     if (!readable(maybe)) continue;
     if (!Prep2((AIBinder*)maybe, &in3)) {
       N.Parcel_writeInt32(in3, 0);
