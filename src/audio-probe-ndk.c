@@ -172,6 +172,26 @@ int main(int argc, char** argv) {
           }
         }
       }
+      if (getenv("GETPORT")) {
+        /* 校准判据：getAudioPort(int) 只带一个 int32，用它一次定死"AIDL 参数块有没有 size 前缀"。
+         * A=只写 int（无信封）；B=写 [size=8][int]（有信封）。谁回 ex=0 谁就是这套 AIDL 的规矩。 */
+        int id = atoi(getenv("GETPORT"));
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        for (int v = 0; v < 2; v++) {
+          AParcel* in3 = NULL; AParcel* out3 = NULL;
+          if (N.Prepare(b, &in3) != 0) break;
+          wI32(in3, 0);
+          if (v == 1) wI32(in3, 8);
+          wI32(in3, id);
+          int s3 = N.Transact(b, 9, &in3, &out3, 0);
+          size_t sz3 = (out3 && N.Parcel_dataSize) ? N.Parcel_dataSize(out3) : 0;
+          int32_t e3 = -1;
+          if (out3) N.Parcel_readInt32(out3, &e3);
+          printf("CAL9 %s st=%d ex=%d reply=%zu => %s\n", v==0?"A 无信封":"B 有信封", s3, e3, sz3,
+                 (s3==0 && e3==0) ? "此形状正确" : (s3!=0 ? "被拒" : "回了异常"));
+          fflush(stdout);
+        }
+      }
       if (getenv("ARGS2")) {
         /* 09-25 反汇编设备自带 core-V2 的 OpenOutputStreamArguments::readFromParcel 得到的权威服务端布局：
          *   [size][i32 A][pres][SourceMetadata][pres][AudioOffloadInfo?][i64][IStreamCallback][IStreamOutEventCallback]
@@ -225,7 +245,7 @@ int main(int argc, char** argv) {
             }
           }
           if (st2 != 0) {   /* 失败也要看回包：EX_SERVICE_SPECIFIC 会带 errorCode+String16 原因 */
-            size_t rsz = N.Parcel_dataSize ? N.Parcel_dataSize(out2) : 0;
+            size_t rsz = (out2 && N.Parcel_dataSize) ? N.Parcel_dataSize(out2) : 0;
             printf("ARGS2-FAIL reply-size=%zu", rsz);
             if (out2 && rsz > 0 && rsz <= 512) {
               static uint8_t fb[512]; int fl = 0;
