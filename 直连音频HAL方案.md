@@ -1293,3 +1293,13 @@ SINK t=… fed=368640 cons=368640 state=3(ACTIVE) lat=129 xrun=0 data 读=写 �
 - 接进 `droid-drm-takeover/desk-takeover.sh` 的 AUDIO_BRIDGE 块（起 halsink + 容器 aa-feeder）
   与 `desk-stop/rollback`（`pkill -x argsloop` + 交还时 `ctl.start audioserver`）。
 - 真容器应用出声试听（`pw-play`）；换机型重抓模板；`BURSTFR` 语义在真信号下再复验一次。
+
+### 33.2b ★用户口述确认（19:1x）
+经完整 sink 链（`cat tone_s16.pcm | nc` → argsloop SINK → HAL → 喇叭）放 1.5s/440Hz/s16 amp4000，
+用户反馈"**听到清晰 440Hz 单音**" ⇒ s16→s32 转换、实时投喂、无爆音/卡顿全部正确。
+**M3（独立 sink）完成。** 设备已 `pkill -x argsloop` + `ctl.start audioserver`，无残留。
+
+## 34. M4（下一步，需另约时间跑真实接管轮）
+把这根已验证的管子接进 `droid-drm-takeover`：desk-takeover 的 AUDIO_BRIDGE 块起 `halsink.sh` + 容器
+`aa-feeder.sh`；desk-stop/rollback 里 `pkill -x argsloop` 收尾、交还安卓时 `ctl.start audioserver`。
+真容器应用（`pw-play`/浏览器）出声复验。**红线**：绝不在当前接管轮还活着时重跑 takeover。
