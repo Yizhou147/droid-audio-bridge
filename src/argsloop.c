@@ -681,7 +681,6 @@ int auto_build(void* h) {
         if (found < 0) printf("  APC: 值扫描也没找到 portId=%d\n", want);
       }
       if (found >= 0) {
-      {
         int sz = *(int*)(g_cfg + found);
         static uint8_t elem[4096];
         memcpy(elem, g_cfg + found, (size_t)sz);
