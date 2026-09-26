@@ -16,6 +16,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
 #include <unistd.h>
 
 typedef void AParcel;
@@ -700,6 +702,11 @@ int auto_build(void* h) {
       uint8_t* b = (uint8_t*)g_qmem[q];
       if (wwid == 8) *(uint64_t*)(b + woff) = (uint64_t)wval; else *(uint32_t*)(b + woff) = (uint32_t)wval;
       printf("  写了 q%d +%d = %d (宽%d)\n", q, woff, wval, wwid);
+      if (getenv("FK")) {            /* AIDL FMQ 是 futex 通知的（AshmemFutex），只改计数器不叫醒对方 */
+        for (int t = 0; t < 64; t += 4)
+          syscall(SYS_futex, (char*)g_qmem[q] + t, FUTEX_WAKE_PRIVATE, 0x7fffffff, NULL, NULL, 0);
+        printf("  FK: 已对 q%d 头部 64 字节的每个字发 FUTEX_WAKE\n", q); fflush(stdout);
+      }
       usleep((getenv("S") ? atoi(getenv("S")) : 1000) * 1000);
       for (int i = 0; i < g_nq; i++) {
         uint8_t* b2 = (uint8_t*)g_qmem[i];
