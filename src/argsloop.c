@@ -1557,12 +1557,14 @@ int auto_build(void* h) {
       (OUT)[0] = *(int32_t*)(rq + 16);   /* status */                      \
       (OUT)[1] = *(int32_t*)(rq + 20);   /* fmqByteCount */                \
       (OUT)[2] = *(int32_t*)(rq + 64);   /* state */                       \
+      obsFrames = *(int64_t*)(rq + 24);                                    \
       hwFrames = *(int64_t*)(rq + 40);                                     \
+      latMs = *(int32_t*)(rq + 56); xrun = *(int32_t*)(rq + 60);           \
       *(uint64_t*)(rq + 0) += 56;                                          \
       *(uint32_t*)(rq + 72) |= 2;                                          \
       syscall(SYS_futex, rq + 72, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);  \
     } while (0)
-    int rpy[3]; int64_t hwFrames = 0;
+    int rpy[3]; int64_t hwFrames = 0, obsFrames = 0; int latMs = -1, xrun = -1;
     SEND_CMD(2, 0);                                   /* start */
     usleep(600000);
     TAKE_REPLY(rpy);
@@ -1571,7 +1573,7 @@ int auto_build(void* h) {
     /* 输出方向的正确用法：先把数据投进 dataMQ（环形位置 = 写指针 % 容量），
      * 再发 burst(N) 告诉 HAL "刚写了 N 字节"；Reply.fmqByteCount = 它真消费的字节数。
      * 载荷全零 ⇒ 全程静音。 */
-    for (int iter = 0; iter < 4; iter++) {
+    for (int iter = 0; iter < 8; iter++) {
       int chunk = 1920;                                /* 240 帧 × 8 字节 */
       if ((uint64_t)chunk > dcap) chunk = (int)dcap;
       uint64_t wp = *(uint64_t*)(dq + 8) % dcap;
@@ -1585,13 +1587,14 @@ int auto_build(void* h) {
       usleep(700000);
       TAKE_REPLY(rpy);
       printf("  SESSION 轮%d: 投 %d 字节 burst(%d) -> Reply{status=%d 消费=%d state=%d} "
-             "hw.frames=%lld data 读=%llu 写=%llu\n", iter, chunk, chunk, rpy[0], rpy[1],
-             rpy[2], (long long)hwFrames,
+             "obs=%lld hw=%lld lat=%d xrun=%d data 读=%llu 写=%llu\n", iter, chunk, chunk,
+             rpy[0], rpy[1], rpy[2], (long long)obsFrames, (long long)hwFrames, latMs, xrun,
              (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
       fflush(stdout);
     }
 #undef SEND_CMD
 #undef TAKE_REPLY
+    dump_write_threads("SESSION末");   /* write_db 的累计 CPU：非 0 才说明真在搬数据 */
   }
 
   hunt_fds("Return(平台解析后的结构)", ret, 512);
