@@ -1090,6 +1090,19 @@ int auto_build(void* h) {
             w = strtok(NULL, ",");
           }
         }
+        /* PAUTO=1：实测 C++ 对象 sizeof(AudioPatch)=88，两个 int 数组在 +8 / +32（vector 的 begin）。
+         * 源=我们自己的 mix portConfigId（args 的头一个 int32），汇=设备端口 configId（PSINK 或 g_devid）。
+         * 上一版手搓同样字节仍被拒（-22），所以这回让平台自己发，异常码/消息一起打出来。 */
+        if (flag("PAUTO")) {
+          int ps = getenv("PSRC") ? atoi(getenv("PSRC")) : *(int32_t*)args;
+          int pd = getenv("PSINK") ? atoi(getenv("PSINK")) : g_devid;
+          void* vs = *(void**)(pobj + 8);
+          void* vt = *(void**)(pobj + 32);
+          if (readable(vs)) { *(int32_t*)vs = ps; printf("  PP: PAUTO sources[0]=%d（+%d）\n", ps, 8); }
+          else printf("  PP: PAUTO: sources 指针不可读 %p\n", vs);
+          if (readable(vt)) { *(int32_t*)vt = pd; printf("  PP: PAUTO sinks[0]=%d（+%d）\n", pd, 32); }
+          else printf("  PP: PAUTO: sinks 指针不可读 %p\n", vt);
+        }
         if (flag("SENDP")) {
           static char po[1024]; memset(po, 0, sizeof po);
           static char pws2[32];
@@ -1098,7 +1111,11 @@ int auto_build(void* h) {
           g_capcode = oc2;
           void* sv = *(void**)pws2;
           int (*gst)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
-          printf("  PP: setAudioPatch st=%d 回写对象头:", sv && gst ? gst(sv) : -999);
+          int (*gex)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getExceptionCode");
+          const char* (*gmsg)(const void*) = (const char*(*)(const void*))dlsym(N.ndk, "AStatus_getMessage");
+          printf("  PP: setAudioPatch st=%d ex=%d msg=\"%s\" 回写对象头:",
+                 sv && gst ? gst(sv) : -999, sv && gex ? gex(sv) : -999,
+                 sv && gmsg && gmsg(sv) ? gmsg(sv) : "");
           for (int q = 0; q < 8; q++) printf(" %d", *(int*)(po + 4 * q));
           printf("\n"); fflush(stdout);
         }
