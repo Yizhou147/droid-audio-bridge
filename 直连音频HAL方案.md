@@ -421,3 +421,19 @@ B 路的真实障碍也记清楚（§14）：**整颗 `stop` 之后 `hwservicema
 把 `desk-takeover.sh` 的 `run "stop"` 换成按需逐个停（至少保 audioserver / hwservicemanager /
 system_suspend 存活），AAudio 复用 anland 态已验证的真链路（音量/路由/蓝牙全带）。
 风险＝漏停某服务（当初用整颗 stop 就是为了干净），需实跑一轮定判据；备份 `desk-takeover.sh.bak-0926-audio`。
+
+## 16. 【09-26 ★A 路实际已通到"差一个合法 id"】字节级复刻平台打包 + HAL 当裁判
+
+- 用 `.rela.plt` + stub 的 `adrp/ldr` 反查 GOT，才拿到**真实**的读/写端调用顺序（objdump 按"最近前符号"贴 PLT 名，此前所有"调用顺序"结论都被它带偏过两次）。
+- 由此定正：`Arguments` 块 = `[size][字段A=presId][pres=1][portConfig 块][pres(offload)=0][i64][IStreamCallback 对象][IStreamOutEventCallback 对象]`，
+  **两个回调是 24 字节 `flat_binder_object`**（这就是真值 88 ≠ 我手搓 44 的全部原因；`AParcel_writeByte` 每字节还占 4 字节格，`H:` 得按 int32 写）。
+- `argsloop AUTO` 自动回填 size ⇒ **算出块长正好 88**，与平台 `writeToParcel` 真值逐字节一致；
+  `Arguments::readFromParcel` 收（`READ st=0`）、`BpModule::openOutputStream` 送达（`TRANSACT st=0`），
+  并且 **HAL 实现真的跑起来并念出读到什么**：
+  `openOutputStream: r_submix: port config id 8, has offload info? 0, buffer size 0 frames`
+  → `port config id 8 does not correspond to an output mix port`（id 0/1/2/3/9/10/16/53 一律 `Line 972 Failed`）。
+- 判明 r_submix 当不了试验场：它当前只有 1 条 port config（id 8），且**没有"输出 mix port"**——
+  mix port 是按流存在的；轮里 audioserver 死了 ⇒ 没人往 submix 里放音 ⇒ 永远不会出现输出 mix port。
+- ⇒ 下一步必须在 `IModule/default`（真喇叭所在模块）上取/试合法 port config id（dumpsys 里
+  speaker device port id=23、portConfig id=53@48000/INT_16/STEREO）。**注意：在 default 上开流会走
+  AGM 建图 + 给 smart amp 上电，属于"可能有一声/咔哒"的动作类别 —— 虽仍不写任何采样，做之前必须先跟用户约。**
