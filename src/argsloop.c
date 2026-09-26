@@ -1080,6 +1080,33 @@ int auto_build(void* h) {
     }
     fflush(stdout);
   }
+  /* PULL=1：/proc/<tid>/syscall 显示 HAL 的 write_db 阻塞在"命令队列 +24 事件字、bitset 0x2
+   * (READ_NOTIFIED)"⇒ 它是**生产者**，我们是消费者。那就按消费者该做的做：
+   * 读元素、把读指针推到写指针、再置 READ_NOTIFIED 位 + 共享 WAKE，把它放行；
+   * 然后把队列头 64 字节原样打出来 —— 它到底往这儿写了什么，就是真正的协议。 */
+  if (getenv("PULL") && g_nq >= 1) {
+    uint8_t* cq = (uint8_t*)g_qmem[0];
+    for (int round = 0; round < 3; round++) {
+      uint64_t w = *(uint64_t*)(cq + 8), r = *(uint64_t*)(cq + 0);
+      printf("  PULL 轮%d: 写指针=%llu 读指针=%llu 槽@16:", round,
+             (unsigned long long)w, (unsigned long long)r);
+      for (int t = 16; t < 32; t += 4) printf(" %d:%u", t, *(uint32_t*)(cq + t));
+      printf("\n");
+      if (w != r) {                       /* 有货：取走并回报 */
+        uint32_t tag = *(uint32_t*)(cq + 16), pl = *(uint32_t*)(cq + 20);
+        printf("  PULL: 收到元素 tag=%u payload=%u\n", tag, pl);
+        *(uint64_t*)(cq + 0) = w;         /* 消费者读指针 = 写指针 */
+        *(uint32_t*)(cq + 24) |= 2;      /* READ_NOTIFIED */
+        syscall(SYS_futex, cq + 24, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
+      }
+      fflush(stdout);
+      usleep(1200000);
+    }
+    printf("  PULL 之后 头 64 字节:");
+    for (int t = 0; t < 64; t += 4) printf(" %d:%u", t, *(uint32_t*)(cq + t));
+    printf("\n"); fflush(stdout);
+    dump_write_threads("PULL后");
+  }
   hunt_fds("Return(平台解析后的结构)", ret, 512);
   hunt_fds("greply(抓到的原始回包)", g_greply, g_greply_len);
   AIBinder* stream = NULL;
