@@ -57,6 +57,10 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/argsloop.c -o out/argsloop
 
+# 数据面取证：open→取 IStreamOut→getStreamCommon→找 FMQ fd
+"$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
+    src/stream-probe.c -o out/stream-probe
+
 # 轮内 activity 服务桩（让 audioserver 走完 onFirstRef 的 waitForService("activity")）
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/activity-stub.c -o out/activity-stub
