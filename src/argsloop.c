@@ -1121,7 +1121,7 @@ int auto_build(void* h) {
         char objs[64]; strncpy(objs, getenv("VPOBJS") ? getenv("VPOBJS") : "8,12,16,24,48,52,56,64", sizeof objs - 1);
         objs[sizeof objs - 1] = 0;
         size_t idl = strlen(vid);
-        size_t idpad = (idl + 4) & ~(size_t)3;
+        (void)idl;
         char* w = strtok(objs, ",");
         while (w) {
           int osz = atoi(w);
@@ -1131,12 +1131,12 @@ int auto_build(void* h) {
            * ⇒ 结构自己**要读** objectSize，但没有 [flag] 状态头、union 也没有状态头。
            * objectSize 是"后面字段的字节数"（平台读完会按它对齐位置），所以逐个试。 */
           N.Parcel_writeInt32(p, osz);
-          N.Parcel_writeInt32(p, (int32_t)idl);
-          for (size_t t = 0; t < idpad; t += 4) {
-            int32_t chunk = 0;
-            if (t < idl) memcpy(&chunk, vid + t, idl - t >= 4 ? 4 : idl - t);
-            N.Parcel_writeInt32(p, chunk);
-          }
+          /* id 交给平台自己的 AParcel_writeString 编：AParcel_create 出来的是**平台 parcel**
+           * （UTF-16 串），手搓 UTF-8 会被 readString 判成 BAD_TYPE(-2147483640)。 */
+          int32_t (*pwstr)(AParcel*, const char*) =
+            (int32_t(*)(AParcel*, const char*))dlsym(N.ndk, "AParcel_writeString");
+          int sw = pwstr ? pwstr(p, vid) : -999;
+          if (sw != 0) { printf("  VPNEW: objectSize=%d 写串失败 %d\n", osz, sw); w = strtok(NULL, ","); continue; }
           N.Parcel_writeInt32(p, vidx);
           N.Parcel_writeInt32(p, vval);
           N.Parcel_setPos(p, 0);      /* 不解码自己刚写到尾巴的 parcel（上一版没回卷 ⇒ 恒 -61） */
