@@ -520,3 +520,27 @@ id=64/65 not found
 `STREAM` 模式因此拿不到句柄（回包空）。**要清场只能重启音频 HAL**
 （`pkill -x android.hardware.audio.service` 之类，init 会自动拉回，属"改动设备运行状态"，等你点头再做）。
 清场后一次只试一个 id：fd 增长＝开成 → 抽 `IStreamOut` 句柄 → `getStreamCommon` 取 FMQ fd → mmap → 写零帧。
+
+## 20. 【09-26 11:2x】RAWX 隔离实验：原始 binder 路线被卡在 aux/objects 层
+
+1. **id=63 是真正能开流的 portConfig**（HAL 重启后重放：`fd 74→77`、线程 +1、无任何报错）；
+   54–62 是 HAL 启动时**自己预占**的（`already has a stream opened on it`）⇒ 53/58 非 mix、56/57/64/65 not found。
+2. **数据包无罪**：`RAWX` 用 `AIBinder_prepareTransaction` + **平台自己的** `Arguments::writeToParcel`
+   生成请求（与 Bp 路径同源、逐字节一致），再用我的原始 `AIBinder_transact`：
+   flags=0 / 0x10000000 / 0x10000010 ⇒ 全失败（`0x80000008`、`-22`），而同一结构体交给
+   `BpModule::openOutputStream` **就成功**。
+3. 又纠正一处我今天反复踩的坑：objdump 给 `bl` 贴的 PLT 名不可信，用 GOT 反查后确认
+   Bp 路径调用链就是 `AIBinder_prepareTransaction → AParcel_writeInt32 → Arguments::writeToParcel
+   → AIBinder_transact(flags=0x10000000) → AParcel_readStatusHeader → AStatus_isOk` —— 与我做的**没有区别**。
+   ⇒ 剩下的唯一差别只能是 **parcel 的 objects/aux 区**（两个 null binder 槽在 aux 里有真实条目，
+   我用 `H:` 写零或 `writeStrongBinder(NULL)` 都造不出与平台一致的 aux 状态；`readFromParcel` 解出的
+   结构体里那两个槽已被物化成对象，再由平台写回 ⇒ aux 与我手包不同）。
+   ⇒ **原始 binder 路线（自己发 transact 再 `AParcel_readStrongBinder` 取流句柄）到此走不通。**
+
+### 20.1 还能走的两条（都不需要 C++ ABI 逆向）
+- **A：符号插桩（interposition）**：在我自己的可执行文件里导出同名 `AIBinder_transact`，
+  平台 Bp 码通过 PLT 调用时会绑到我的实现 ⇒ 我**转发**并顺手把 `reply` parcel 倒出来
+  （读 `AParcel_readParcelFileDescriptor` 拿 FMQ fd）。既保住"平台打包"，又拿到原始回包。
+- **B：继续用平台方法往下调**：`BpStreamOut::getStreamCommon(this, &sp)`（对象就在 `ret+0`，
+  已见其指针），再由 `StreamCommon`/`StreamDescriptor` 一层层交回平台函数解 —— 但取 fd 仍需布局，
+  所以 **A 更划算**。
