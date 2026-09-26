@@ -659,28 +659,34 @@ int auto_build(void* h) {
         printf("  reply ex=%d\n", e3); fflush(stdout);
         if (getenv("MMAP")) {
           /* IStreamCommon::createMmapBuffer = 码 8（从 BpStreamCommon 的 AIDL 声明序数出来）。
-           * 拿它的 fd 就能 mmap 出一块和 HAL 共享的环形区 —— 不依赖 FMQ 协议就有数据通道。 */
-          int (*readSC)(void*, const AParcel*) = (int(*)(void*, const AParcel*))dlsym(h,
-            "_ZN4aidl7android8hardware5audio4core13IStreamCommon14readFromParcelEPK7AParcelPNSt3__110shared_ptrIS4_EE");
-          if (!readSC) printf("  MMAP: 缺 IStreamCommon::readFromParcel 符号\n");
+           * 拿它的 fd 就能 mmap 出一块和 HAL 共享的环形区 —— 不依赖 FMQ 协议就有数据通道。
+           * 逆 IStreamCommon::readFromParcel 这条路实测把进程打崩（它按 parcel 头部语义读，
+           * 位置对不上就是随机行为）；改用平台自己的 BpStreamOut::getStreamCommon 拿
+           * 现成的 std::shared_ptr<IStreamCommon>（libc++ 的 shared_ptr 全零即空，可直接传）。 */
+          void (*getSC)(void*, void*) = (void(*)(void*, void*))dlsym(h,
+            "_ZN4aidl7android8hardware5audio4core11BpStreamOut15getStreamCommonEPNSt3__110shared_ptrINS3_13IStreamCommonEEE");
+          if (!getSC) printf("  MMAP: 缺 BpStreamOut::getStreamCommon 符号\n");
           else {
-            static char scbuf[64]; memset(scbuf, 0, sizeof scbuf);
-            N.Parcel_setPos(out3, 0);
-            int rrc = readSC(scbuf, out3);
-            void* scp = *(void**)scbuf;
-            printf("  MMAP: readFromParcel rc=%d obj=%p\n", rrc, scp); fflush(stdout);
-            void* scb = find_binder_in(scp, "BpStreamCommon");
-            if (scb) {
+            static char spbuf[32]; memset(spbuf, 0, sizeof spbuf);
+            static char scb[64]; memset(scb, 0, sizeof scb);
+            printf("  MMAP: 调平台 getStreamCommon，obj=%p\n", cand); fflush(stdout);
+            call_sret3(getSC, cand, spbuf, scb, scb);      /* 按值返回 ScopedAStatus ⇒ 隐藏 x8 */
+            void* sst = *(void**)scb;
+            int (*gSt)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+            printf("  MMAP: status=%d shared_ptr 指向=%p\n", sst && gSt ? gSt(sst) : -999,
+                   *(void**)spbuf); fflush(stdout);
+            void* scb2 = find_binder_in(*(void**)spbuf, "BpStreamCommon");
+            if (scb2) {
               AParcel* i4 = NULL; AParcel* o4 = NULL;
               int (*rI2)(const AParcel*, int32_t*) =
                 (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
               for (int fk = 0; fk < 2; fk++) {           /* 0x10=ACCEPT_FDS，被拒（-22）则退回 0 */
                 uint32_t flags = fk ? 0 : 0x10;
                 i4 = NULL; o4 = NULL;
-                if (Prep2((AIBinder*)scb, &i4)) break;
+                if (Prep2((AIBinder*)scb2, &i4)) break;
                 N.Parcel_writeInt32(i4, 0);
                 N.Parcel_writeInt32(i4, 2048);           /* minSizeFrames */
-                int s4 = Tx2((AIBinder*)scb, 8, &i4, &o4, flags);
+                int s4 = Tx2((AIBinder*)scb2, 8, &i4, &o4, flags);
                 size_t sz4 = o4 ? N.Parcel_dataSize(o4) : 0;
                 int32_t e4 = -1;
                 if (o4 && rI2) { N.Parcel_setPos(o4, 0); rI2(o4, &e4); }
