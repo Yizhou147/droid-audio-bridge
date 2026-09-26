@@ -1617,13 +1617,14 @@ int auto_build(void* h) {
     double amp = flag("AMP") ? atof(getenv("AMP")) : 3.2e7;      /* 满幅的 1.5% ⇒ 很轻 */
     int rounds = flag("ROUNDS") ? atoi(getenv("ROUNDS")) : (tones ? 60 : 8);
     int slp = flag("SLEEPMS") ? atoi(getenv("SLEEPMS")) : (tones ? 25 : 700);
+    int fs = getenv("FRAME") ? atoi(getenv("FRAME")) : 8;   /* 帧字节：INT_32=8，INT_16=4（low_latency 常是 16-bit）*/
     unsigned long long gframe = 0;                      /* 相位连续，跨轮不跳变 */
     for (int iter = 0; iter < rounds; iter++) {
       uint64_t rp64 = *(uint64_t*)(dq + 0), wp64 = *(uint64_t*)(dq + 8);
       uint64_t avail = dcap - (wp64 - rp64);            /* 还能塞多少字节 */
       int want = tones ? 8192 : 1920;
       int chunk = (int)(avail < (uint64_t)want ? avail : (uint64_t)want);
-      chunk -= chunk % 8;                               /* 2 声道 × int32 = 8 字节/帧 */
+      chunk -= chunk % fs;                              /* 对齐到整帧（fs 字节）*/
       if (chunk <= 0) {                                 /* 数据队列满：等 HAL 读走 */
         if (!wait_rpy_ms(rq, slp)) { usleep(2000); continue; }
         TAKE_REPLY(rpy);
@@ -1633,17 +1634,22 @@ int auto_build(void* h) {
       }
       uint64_t wp = wp64 % dcap;
       if (tones) {
-        int nf = chunk / 8;
+        int nf = chunk / fs;
         for (int f = 0; f < nf; f++) {
           int32_t v = (int32_t)(amp * sin(2.0 * M_PI * (double)tones *
                                           (double)(gframe + (unsigned long long)f) / 48000.0));
-          /* TONECH=L/R 只喂一个声道，用来判左右 driver 分别吃哪一路输入通道（默认 B=两路都给）。 */
-          int32_t vl = v, vr = v;
+          int32_t vl = v, vr = v;                       /* TONECH=L/R 单声道定向 */
           if (tonech == 'L') vr = 0;
           else if (tonech == 'R') vl = 0;
-          uint64_t o1 = (wp + (uint64_t)f * 8) % dcap, o2 = (wp + (uint64_t)f * 8 + 4) % dcap;
-          memcpy(dq + 16 + o1, &vl, 4);
-          memcpy(dq + 16 + o2, &vr, 4);
+          uint64_t o = (wp + (uint64_t)f * fs) % dcap;
+          if (fs == 8) {
+            memcpy(dq + 16 + o, &vl, 4);
+            memcpy(dq + 16 + o + 4, &vr, 4);
+          } else {                                       /* 16-bit：int32 取高 16 位 */
+            int16_t l16 = (int16_t)(vl >> 16), r16 = (int16_t)(vr >> 16);
+            memcpy(dq + 16 + o, &l16, 2);
+            memcpy(dq + 16 + o + 2, &r16, 2);
+          }
         }
         gframe += (unsigned long long)nf;
       } else {
