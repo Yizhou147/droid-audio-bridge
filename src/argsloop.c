@@ -1573,8 +1573,8 @@ int auto_build(void* h) {
            (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8), g_qsz[2],
            dcap, dflag); fflush(stdout);
     SEND_CMD(2, 0);                                   /* start */
-    usleep(600000);
-    TAKE_REPLY(rpy);
+    if (wait_rpy(2000)) TAKE_REPLY(rpy);              /* 等 HAL 真回包（configure 要 ~120ms） */
+    else printf("  SESSION: start 没等到回包\n");
     printf("  SESSION: start -> Reply{status=%d bytes=%d state=%d}\n", rpy[0], rpy[1], rpy[2]);
     fflush(stdout);
     /* 输出方向的正确用法：先把数据投进 dataMQ（环形位置 = 写指针 % 容量），
@@ -1583,6 +1583,18 @@ int auto_build(void* h) {
     /* TONE=<hz>：写正弦而不是零（出声！只在用户点头后用）。
      * 同时把"生产者必须自己看剩余空间"补上 —— 之前固定投 1920 且不看 rp，
      * 静音时无所谓，连续投真信号会盖掉 HAL 还没读的槽。 */
+    /* ★上一版快速投喂会"卡死"的真正原因（本轮计数器抓到的）：
+     * 回包队列容量只有 56 字节 = **一个槽**（映射 4096 = 16 头部 + 56 元素 + 事件字），
+     * 而我不管有没有回包就 TAKE_REPLY ⇒ 读到没写过的槽，又把读指针推过了它，
+     * HAL 下一次 writeBlocking 算出"队列满"就永远阻塞（cmd 读指针冻在 16、data 读冻在 1920）。
+     * 正解：发命令前/收包前都要按 availableToRead 等，且**一问一答**。 */
+#define wait_rpy(TMO_MS) ({                                                   \
+      int _ok = 0;                                                            \
+      for (int _t = 0; _t < (TMO_MS); _t++) {                                 \
+        if (*(uint64_t*)(rq + 8) >= *(uint64_t*)(rq + 0) + 56) { _ok = 1; break; } \
+        usleep(1000);                                                         \
+      }                                                                       \
+      _ok; })
     int tones = flag("TONE") ? atoi(getenv("TONE")) : 0;
     /* 一律用 flag()：脚本里 TONE/AMP/ROUNDS 传的是空串，空串也算"已设置"，
      * 按 getenv 判就会 atoi("")=0 ⇒ 上一版轮数成 0，一帧都没投（也就没出声）。 */
@@ -1596,7 +1608,13 @@ int auto_build(void* h) {
       int want = tones ? 8192 : 1920;
       int chunk = (int)(avail < (uint64_t)want ? avail : (uint64_t)want);
       chunk -= chunk % 8;                               /* 2 声道 × int32 = 8 字节/帧 */
-      if (chunk <= 0) { usleep(20000); continue; }      /* 满了就等消费者 */
+      if (chunk <= 0) {                                 /* 数据队列满：等 HAL 读走 */
+        if (!wait_rpy(slp)) { usleep(2000); continue; }
+        TAKE_REPLY(rpy);
+        printf("  SESSION 轮%d: 队列满，先收 Reply{消费=%d state=%d}\n", iter, rpy[1], rpy[2]);
+        fflush(stdout);
+        continue;
+      }
       uint64_t wp = wp64 % dcap;
       if (tones) {
         int nf = chunk / 8;
@@ -1620,11 +1638,12 @@ int auto_build(void* h) {
       wp64_ = *(uint64_t*)(dq + 8);                    /* 算剩余要用写完之后的指针 */
       int pay = flag("BURSTFR") ? chunk / 8 : chunk;   /* burst 的单位到底是字节还是帧？给个开关 A/B */
       SEND_CMD(3, pay);                                /* burst(N) */
-      usleep((useconds_t)slp * 1000u);
-      TAKE_REPLY(rpy);
+      int got = wait_rpy(slp ? slp : 1);               /* 一问一答：等这条命令的回包（也是天然节流） */
+      if (got) TAKE_REPLY(rpy);
+      else { rpy[1] = -1; rpy[2] = -1; usleep((useconds_t)slp * 1000u); }
       /* 一条 printf 打全（上一版把计数器单开一条 printf，结果那行在 -O2 下压根没输出 ⇒ 合并） */
       printf("  SESSION 轮%d: 投 %d 字节 burst(%d) -> Reply{消费=%d state=%d} "
-             "obs=%lld hw=%lld lat=%d xrun=%d | data 读=%llu 写=%llu 剩=%llu "
+             "obs=%lld hw=%lld lat=%d xrun=%d | data 读=%llu 写=%llu 满=%llu "
              "| cmd 读=%llu 写=%llu | rpy 读=%llu 写=%llu\n",
              iter, chunk, pay, rpy[1], rpy[2],
              (long long)obsFrames, (long long)hwFrames, latMs, xrun,
@@ -1636,6 +1655,7 @@ int auto_build(void* h) {
     }
 #undef SEND_CMD
 #undef TAKE_REPLY
+#undef wait_rpy
     dump_write_threads("SESSION末");   /* write_db 的累计 CPU：非 0 才说明真在搬数据 */
   }
 
