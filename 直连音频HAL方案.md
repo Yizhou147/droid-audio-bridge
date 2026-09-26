@@ -1043,3 +1043,46 @@ SyncWriteRead 是否需要写两次 `written`/`read`、以及 `start` 命令在 
 `audioserver` 已恢复 running；argsloop 退出时它开的流随 binder 死亡自动关闭；全程零采样。
 新增设备侧脚本：`bin/fmq.sh`（开流+发命令）、`bin/open.sh`（LOAD 模板 + start）、
 `bin/data.sh`（数据侧）、`bin/probe-thread.sh`（线程 CPU 裁判）、`bin/futex-addr.sh`（读 futex 参数）。
+
+## 28. 【09-26 17:2x 黑盒试错的边界：通知位/计数器全组合都试过，write_db 始终 CPU=0】
+
+权威成员（`MessageQueueBase.h`）：
+```cpp
+std::atomic<uint64_t>* mReadPtr;            // grantor[0] ⇒ 区内 +0
+std::atomic<uint64_t>* mWritePtr;           // grantor[1] ⇒ 区内 +8
+uint8_t*               mRing;               // grantor[2] ⇒ 区内 +16
+std::atomic<uint64_t>* mWriteRegionEndPtr;  // ← SyncWriteRead 还有"写区域末端"这一项，位置待查
+std::atomic<uint32_t>* mEvFlagWord;         // grantor[3] ⇒ 区内 +16+元素区
+```
+
+试过的组合（每轮都是新开的 DEEP_BUFFER 流，全程零载荷＝静音）：
+
+| 目标 | 计数器写法 | 事件字 | 结果 |
+|---|---|---|---|
+| q0 命令 | +0=1 / +8=1 / +4=1 / +12=1 | 写 1、WAKE_PRIVATE | 无反应（当时 wake 方式还是错的） |
+| q0 命令 | +0=1 | `\|=2` + **共享** WAKE | 事件字被清回 0（说明有等待者被唤醒并自清位），但 `mReadPtr` 不动、无 Reply、无 `start` |
+| q0 命令 | +8=1 | 同上 | 同上，全无反应 |
+| q0（当消费者） | 读 +16、把 +0 推到 +8、置 bit2 | — | **连着 3 轮 `写指针=0 读指针=0`** ⇒ HAL 并没往 q0 里写东西 |
+| q2 数据 | +8=640 | `\|=2` + 全区共享 WAKE（5120 个字） | 不消费 |
+| q2 数据 | +8=640 | `\|=1`（WRITE_NOTIFIED）+ 全区共享 WAKE | 不消费，`write_db` CPU 恒 0 |
+
+而且 `/proc/<tid>/syscall` 显示我们这条流的 `write_db`（tid 与 HAL 自己报的 `increase scheduling for tid` 完全对上）
+一直停在 `futex(uaddr=区内+24, FUTEX_WAIT_BITSET, val=0, bitset=0x2)`、**CPU 从建线程起就是 0**。
+
+⇒ 结论：**不是"我们没叫对门"，而是这个 worker 在等一件我们还没弄清的事**（bitset 0x2 = READ_NOTIFIED
+是"生产者等消费者腾空间"的语义，可 q0 的写指针又一直是 0 —— 两者对不上，说明 q0/q1 的方向或
+`mWriteRegionEndPtr` 那套 SyncWriteRead 双区域布局，与我从 AIDL 字段顺序推的假设不一致）。
+
+### 28.1 所以正确的下一步只有一个：**读实现，别再猜**
+
+黑盒矩阵已经打满（2 个方向 × 4 个计数器偏移 × 2 个通知位 × 共享/私有 WAKE），继续试下去
+每次都要 25 秒一轮且不能自证。**该改成读权威实现并照抄**，具体两处：
+
+1. `frameworks/native/libs/binder/include/binder/FmqFutex?`/`AidlMessageQueueCpp.h`
+   —— AIDL FMQ 的发布/唤醒真实动作（libfmq 那个仓库里只有 176 行声明，实现不在那儿）；
+2. 更直接：**反汇编 `pulled/libaudiohal_aidl.so`**（框架侧 AIDL 客户端，已 pull 在本地）里
+   `AidlMessageQueue<…>::writeBlocking/write/reread` 的内联代码 —— 它就是生产环境里真正写这些字节的人，
+   把它写了哪几个 offset 读出来即可。
+
+**判定标准不变**（都无声）：`write_db` 的 CPU 开始涨 ⇒ 消费发生；`AHAL_StreamOut_QTI: start` ⇒ PAL 启动；
+`q1` 回包队列出现 `state=ACTIVE` ⇒ 协议闭环。
