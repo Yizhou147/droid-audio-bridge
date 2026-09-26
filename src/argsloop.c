@@ -277,6 +277,45 @@ int auto_build(void* h) {
       fflush(stdout);
     }
   }
+  if (getenv("RAWX") && rr == 0) {
+    /* 隔离实验：请求 parcel 由 prepareTransaction + 平台 writeToParcel 产生（字节与 Bp 路径同源），
+     * 但发送用我的原始 AIBinder_transact ⇒ 区分"打包差异"与"调用方式差异"。 */
+    const char* svc = getenv("SVC") ? getenv("SVC") : "android.hardware.audio.core.IModule/r_submix";
+    void (*Proc_setMax)(uint32_t) = (void(*)(uint32_t))dlsym(N.ndk, "ABinderProcess_setThreadPoolMaxThreadCount");
+    void (*Proc_start)(void) = (void(*)(void))dlsym(N.ndk, "ABinderProcess_startThreadPool");
+    AIBinder* (*SM_get)(const char*) = (AIBinder*(*)(const char*))dlsym(N.ndk, "AServiceManager_getService");
+    void (*IncStrong)(AIBinder*) = (void(*)(AIBinder*))dlsym(N.ndk, "AIBinder_incStrong");
+    void* (*CD)(const char*, void*, void*, void*) = (void*(*)(const char*,void*,void*,void*))dlsym(N.ndk, "AIBinder_Class_define");
+    int (*Assoc)(AIBinder*, const void*) = (int(*)(AIBinder*,const void*))dlsym(N.ndk, "AIBinder_associateClass");
+    int (*Prep)(AIBinder*, AParcel**) = (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
+    int (*Tx)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) =
+      (int(*)(AIBinder*,uint32_t,AParcel**,AParcel**,uint32_t))dlsym(N.ndk, "AIBinder_transact");
+    int (*rB)(const AParcel*, AIBinder**) = (int(*)(const AParcel*, AIBinder**))dlsym(N.ndk, "AParcel_readStrongBinder");
+    if (Proc_setMax) Proc_setMax(4);
+    if (Proc_start) Proc_start();
+    AIBinder* mb = SM_get(svc);
+    if (mb && IncStrong) IncStrong(mb);
+    char dsc[160]; snprintf(dsc, sizeof dsc, "%s", svc);
+    char* sl3 = strrchr(dsc, '/'); if (sl3) *sl3 = 0;
+    const void* cls3 = CD(dsc, (void*)noop_create, (void*)noop_destroy, (void*)noop_transact);
+    if (Assoc && mb) Assoc(mb, cls3);
+    int (*wArgs2)(const void*, AParcel*) = (int(*)(const void*, AParcel*))dlsym(h,
+      "_ZNK4aidl7android8hardware5audio4core7IModule25OpenOutputStreamArguments13writeToParcelEP7AParcel");
+    for (int fi = 0; fi < 3; fi++) {
+      uint32_t fl = (uint32_t)(fi == 0 ? 0 : fi == 1 ? 0x10000000 : 0x10000010);
+      AParcel* rin = NULL; AParcel* rout = NULL;
+      if (!mb || Prep(mb, &rin)) { printf("RAWX prepare 失败\n"); break; }
+      N.Parcel_writeInt32(rin, 0);
+      int ws = wArgs2(args, rin);
+      int rs = Tx(mb, 15, &rin, &rout, fl);
+      size_t rsz = rout ? N.Parcel_dataSize(rout) : 0;
+      int32_t rex = -1; AIBinder* stm = NULL;
+      if (rout) { int (*rI)(const AParcel*, int32_t*) = (int(*)(const AParcel*,int32_t*))dlsym(N.ndk,"AParcel_readInt32"); if (rI) rI(rout, &rex); if (rB) rB(rout, &stm); }
+      printf("RAWX flags=%#x writeArgs=%d transact=%d reply=%zu ex=%d stream=%p\n",
+             fl, ws, rs, rsz, rex, (void*)stm); fflush(stdout);
+    }
+    return 0;
+  }
   if (!getenv("TRANSACT") || rr != 0) return rr == 0 ? 0 : 9;
 
   /* 用平台 BpModule 发这个"平台刚解出来"的结构体 ⇒ 打包完全由平台做，我们只负责喂对的字节 */
