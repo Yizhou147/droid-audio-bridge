@@ -931,3 +931,59 @@ AHAL_Module_QTI: setAudioPortConfig: created new port config for deep_buffer_out
 - `auto_build` 里的 `args` 是**平台解出来的 C++ Arguments 结构**，不是 AParcel ——
   拿它当 AParcel 用直接 SIGSEGV@0x58。改 portConfigId 就一句 `*(int32_t*)args = nid;`。
 - 设备上的 `why.log` 改名成 `why.args.log` 后别再拿旧名找；`grep 'RO +'` 里 `+` 要引号包住整条 pattern。
+
+## 26. 【09-26 16:35 ★A 路里程碑：接管轮条件下真开成了 DEEP_BUFFER 流】+ 卡点精确到"一个 futex 地址"
+
+### 26.1 模板存盘 + 平台反序列化 ⇒ 接管轮里自建 portConfig 成功
+
+`SAVE` 把框架那份 config 的 **wire 字节**切出来（实测 @292、长 120、原 id=55）存成
+`/data/local/tmp/cfg2.bin`；`LOAD` 把字节写回 AParcel 后调平台导出的
+`aidl::android::media::audio::common::AudioPortConfig::readFromParcel` ⇒ 得到字段齐全、
+optional 已 engage 的 C++ 对象（**完全不用猜 C++ 偏移**）。然后 id 清 0 → 码 18 → 码 15：
+
+```
+LOAD: readFromParcel rc=0 ⇒ id=55 portId=2 sr=48000 mask=3 type=1
+LOAD: setAudioPortConfig st=0 ok=1 ⇒ 新 id=53
+AHAL_Module_QTI: setAudioPortConfig: created new port config for deep_buffer_out AudioPortConfig{id: 53, …}
+AHAL_Module_QTI: openOutputStream: port config id 53 …
+AHAL_StreamOut_QTI: StreamOutPrimary : usecase: DEEP_BUFFER_PLAYBACK IoHandle: 21
+AHAL_Stream_QTI: setThreadName rename for tid : write_db, flag:AudioIoFlags{output: 8}
+[GOT] reply=533 字节 ex=0      ← 开流成功，三块 ashmem 的 fd 9/10/11 进了我们进程
+```
+**这一切是在 `setprop ctl.stop audioserver` 之后做的** ⇒ 正是接管轮的条件。
+（顺带确认：audioserver 一停，`getAudioPortConfigs: returning 0 port configs`，
+所以模板必须提前存盘 —— 这是 A 路的硬前提。）
+
+### 26.2 卡点收窄：我们的 `write_db` 线程 **CPU=0**，说明它根本没被叫醒
+
+持流 20 秒的窗口里采样 HAL 线程（`probe-thread.sh`，看 comm/wchan/累计 CPU）：
+
+```
+tid=7987 comm=write_db   state=S wchan=futex_wait_queue cpu=0     ← 我们那条：一次都没跑
+tid=9455 comm=write_ll   state=S wchan=futex_wait_queue cpu=7  →  第二次采样 cpu=20（在干活）
+tid=9488 comm=write_raw  … cpu=0
+```
+⇒ **机制本身是通的**（框架那条 write_ll 在正常消费、CPU 在涨），
+而我们的 write_db 停在 futex 上、0 消耗 ⇒ 唤醒地址不对。
+
+命令/数据两侧计数器 +0/+8 都试过、Reply 队列全 0，且
+`FK=1` 只 futex-wake 了队列头部 64 字节 —— 按 grantor 表：
+
+| 队列 | 元素区 | **事件字真正位置** | 我 wake 过的地方 |
+|---|---|---|---|
+| q0 命令 | +16, 长 8 | **+24** | +24 ✓ |
+| q1 回包 | +16, 长 56 | **+72** | 没 wake |
+| q2 数据 | +16, 长 16384 | **+16400** | 只 wake 了 0..64 ⇒ **差一个页** |
+
+而且 q2 我们只 mmap 了 16384 字节（倍增试探在 32768 才失败 ⇒ 认为就是 16384），
+**没覆盖到 +16400 的事件字** —— 这与"write_db 一次都没被叫醒"完全自洽。
+
+### 26.3 下一件事（很小，但可能就是要害）
+
+1. 把每块队列的 mmap 至少扩到 `16 + extent + 8`（q2 需要 ≥16408 字节），
+   然后对 **q0+24 / q1+72 / q2+16400** 三个事件字各发一次 `FUTEX_WAKE`；
+2. 同时把命令写到 q0+16（`Command{tag=2}`），并试两种 `Parceled` 槽布局：
+   `[u32 tag][u32 payload]` 与 `[u32 messageSize][u32 tag]`（`AidlMessageQueue` 对
+   非 POD 元素用序列化槽，槽首 4 字节可能是消息长度 —— 这决定 HAL 能不能认出这是 `start`）；
+3. 判据不变：`write_db` 的 CPU 开始涨 + `AHAL_StreamOut_QTI: start` + Reply 队列出现 `state=ACTIVE`。
+   到那一步再喂真正的 PCM（先零帧）。
