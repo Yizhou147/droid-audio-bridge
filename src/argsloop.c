@@ -729,6 +729,13 @@ int auto_build(void* h) {
           printf("  NOPRE: st=%d ok=%d 回传出 8 int32:", sv8 && gst8 ? gst8(sv8) : -999, *(int*)ok2);
           for (int t = 0; t < 8; t++) printf(" %d", *(int*)(ro + 4*t));
           printf("\n"); fflush(stdout);
+          int nd = getenv("DUMPRO") ? atoi(getenv("DUMPRO")) : 0;
+          for (int t = 0; t + 8 <= nd; t += 8) {
+            printf("  RO +%d:", t);
+            for (int q = 0; q < 8; q++) printf(" %d", *(int*)(ro + t + 4*q));
+            printf("\n");
+          }
+          fflush(stdout);
           if (*(int*)ro > 0) printf("  NOPRE: ★新 portConfigId = %d\n", *(int*)ro);
           g_capcode = 15;
           tmpl = my;   /* 复用后面的分支，不再走模板路径 */
@@ -749,6 +756,11 @@ int auto_build(void* h) {
           int (*gst7)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
           printf("  ACP3: st=%d ok=%d 新 config 头 8 int32:",
                  sv7 && gst7 ? gst7(sv7) : -999, *(int*)ok3);
+          for (int t = 0; t + 8 <= (getenv("DUMPRO") ? atoi(getenv("DUMPRO")) : 0); t += 8) {
+            printf("  RO +%d:", t);
+            for (int q = 0; q < 8; q++) printf(" %d", *(int*)(res3 + t + 4*q));
+            printf("\n");
+          }
           for (int t = 0; t < 8; t++) printf(" %d", *(int*)(res3 + 4*t));
           printf("\n"); fflush(stdout);
           *(int*)tmpl = oldid;                          /* 还原平台对象 */
