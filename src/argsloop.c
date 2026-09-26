@@ -1027,11 +1027,12 @@ int auto_build(void* h) {
     uint8_t* cq = (uint8_t*)g_qmem[0];
     uint8_t* rq = (uint8_t*)g_qmem[1];
     uint64_t wcnt = *(uint64_t*)(cq + wo), rcnt = *(uint64_t*)(cq + (wo ? 0 : 8));
+    if (getenv("THR")) dump_write_threads("前");
     printf("  CMD: 命令队列 计数器+%d=%llu 另一侧=%llu  Reply@+16 前 56 字节:",
            wo, (unsigned long long)wcnt, (unsigned long long)rcnt);
     for (int t = 16; t < 72; t += 4) printf(" %d:%d", t, *(int32_t*)(rq + t));
     printf("\n");
-    if (getenv("CSLOT")) {                                  /* 另一种槽布局：[消息长度][tag] */
+    if (getenv("CSLOT") && getenv("CSLOT")[0]) {                                  /* 另一种槽布局：[消息长度][tag] */
       *(int32_t*)(cq + 16) = 4;
       *(int32_t*)(cq + 20) = tag;
       printf("  CMD: 用 CSLOT 布局 [len=4][tag=%d]，计数器偏移待试\n", tag);
@@ -1048,6 +1049,7 @@ int auto_build(void* h) {
     printf("  CMD: 写了 tag=%d payload=%d，计数器 %llu -> %llu，并对事件字(+24)发 WAKE\n",
            tag, payload, (unsigned long long)wcnt, (unsigned long long)(wcnt + 1));
     usleep((getenv("S") ? atoi(getenv("S")) : 1500) * 1000);
+    if (getenv("THR")) dump_write_threads("后");
     printf("  CMD: 之后 命令队列 +%d=%llu +%d=%llu\n", wo,
            *(unsigned long long*)(cq + wo), wo ? 0 : 8, *(unsigned long long*)(cq + (wo ? 0 : 8)));
     printf("  CMD: Reply@+16:");
