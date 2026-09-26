@@ -1272,6 +1272,68 @@ int auto_build(void* h) {
     printf("\n"); fflush(stdout);
     dump_write_threads("PULL后");
   }
+  /* SESSION=1：照 VTS 的客户端流程走完整一遍（全程零载荷＝静音）
+   *   start → 读 Reply → **把回包队列的读指针按字节推进 + 置 READ 位**（否则对侧生产者会卡死）
+   *   → burst 问可写字节数 → 往 dataMQ 写那么多零 → 再 burst 看 hardware.frames 是否推进
+   * 队列身份按 StreamDescriptor 字段序：q0=command q1=reply q2=data；
+   * 每块布局 [u64 读指针 @0][u64 写指针 @8][元素 @16][事件字 @16+容量]，指针一律按字节计。 */
+  if (getenv("SESSION") && g_nq >= 3) {
+    uint8_t* cq = (uint8_t*)g_qmem[0];
+    uint8_t* rq = (uint8_t*)g_qmem[1];
+    uint8_t* dq = (uint8_t*)g_qmem[2];
+    size_t dcap = g_qsz[2] > 16408 ? 16384 : 0;
+    uint32_t dflag = (uint32_t)(16 + dcap);            /* data 队列的事件字偏移 */
+#define SEND_CMD(TAG, PAY) do {                                            \
+      *(uint32_t*)(cq + 16) = (uint32_t)(TAG);                             \
+      *(uint32_t*)(cq + 20) = (uint32_t)(PAY);                             \
+      *(uint64_t*)(cq + 8) += 8;                                           \
+      *(uint32_t*)(cq + 24) |= 2;                                          \
+      syscall(SYS_futex, cq + 24, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);  \
+    } while (0)
+#define TAKE_REPLY(OUT) do {                                               \
+      (OUT)[0] = *(int32_t*)(rq + 16);   /* status */                      \
+      (OUT)[1] = *(int32_t*)(rq + 20);   /* fmqByteCount */                \
+      (OUT)[2] = *(int32_t*)(rq + 64);   /* state */                       \
+      hwFrames = *(int64_t*)(rq + 40);                                     \
+      *(uint64_t*)(rq + 0) += 56;                                          \
+      *(uint32_t*)(rq + 72) |= 2;                                          \
+      syscall(SYS_futex, rq + 72, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);  \
+    } while (0)
+    int rpy[3]; int64_t hwFrames = 0;
+    SEND_CMD(2, 0);                                   /* start */
+    usleep(600000);
+    TAKE_REPLY(rpy);
+    printf("  SESSION: start -> Reply{status=%d bytes=%d state=%d} hw.frames=%lld\n",
+           rpy[0], rpy[1], rpy[2], (long long)hwFrames); fflush(stdout);
+    SEND_CMD(3, 0);                                   /* burst：问能写多少 */
+    usleep(600000);
+    TAKE_REPLY(rpy);
+    int room = rpy[1];
+    printf("  SESSION: burst -> Reply{status=%d 可写=%d state=%d}\n", rpy[0], room, rpy[2]);
+    fflush(stdout);
+    if (room > 0) {
+      memset(dq + 16, 0, (size_t)room > g_qsz[2] - 16 ? g_qsz[2] - 16 : (size_t)room);
+      *(uint64_t*)(dq + 8) += (uint64_t)room;         /* 数据指针按字节推进 */
+      *(uint32_t*)(dq + dflag) |= 2;
+      syscall(SYS_futex, dq + dflag, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
+      printf("  SESSION: 往 dataMQ 投了 %d 字节（全零=静音），写指针 -> %llu\n", room,
+             (unsigned long long)*(uint64_t*)(dq + 8)); fflush(stdout);
+    }
+    usleep(1200000);
+    printf("  SESSION: dataMQ 读指针=%llu 写指针=%llu（读指针动起来=HAL 真的吃下了）\n",
+           (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
+    SEND_CMD(3, 0);                                   /* 再 burst：看 frames 推进 */
+    usleep(600000);
+    TAKE_REPLY(rpy);
+    printf("  SESSION: 再 burst -> Reply{status=%d 可写=%d state=%d} hw.frames=%lld\n",
+           rpy[0], rpy[1], rpy[2], (long long)hwFrames);
+    printf("  SESSION: q2 读指针=%llu 写指针=%llu\n",
+           (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
+    fflush(stdout);
+#undef SEND_CMD
+#undef TAKE_REPLY
+  }
+
   hunt_fds("Return(平台解析后的结构)", ret, 512);
   hunt_fds("greply(抓到的原始回包)", g_greply, g_greply_len);
   AIBinder* stream = NULL;
