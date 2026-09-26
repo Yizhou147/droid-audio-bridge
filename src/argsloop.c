@@ -110,9 +110,21 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
     if (rb) { AIBinder* st = NULL; if (rb(op, &st) == 0 && st) g_gstream = st; }
     N.Parcel_setPos(op, 0);          /* 交还给平台代码自己解析 */
     printf("  [GOT] reply=%d 字节 ex=%d stream=%p\n", g_greply_len, ex, (void*)g_gstream);
-    for (int q = 0; q < g_greply_len && q < 96; q += 4)
+    for (int q = 0; q < g_greply_len; q += 4) {
       printf("%02x:%08x ", q, *(uint32_t*)(g_greply + q));
+      if ((q / 4) % 8 == 7) printf("\n");
+    }
     printf("\n");
+    /* 真正判 fd 的办法：让 AParcel 自己在每个位置尝试读 ParcelFileDescriptor ——
+     * 只有对象表里那个位置是 TYPE_FD 才会成功，比"整数看着像 fd"可靠得多。 */
+    int (*rfdp)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
+    for (int pos = 0; rfdp && pos + 4 <= g_greply_len; pos += 4) {
+      int fd = -1;
+      N.Parcel_setPos(op, pos);
+      if (rfdp(op, &fd) == 0 && fd >= 0 && fd < 4096) printf("  [GOT] PFD@%d = %d\n", pos, fd);
+    }
+    N.Parcel_setPos(op, 0);
+    fflush(stdout);
     fflush(stdout);
   }
   return r;
