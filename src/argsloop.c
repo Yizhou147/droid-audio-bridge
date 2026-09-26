@@ -1712,10 +1712,18 @@ int auto_build(void* h) {
     }
     signal(SIGTERM, sink_on_term); signal(SIGINT, sink_on_term);
     printf("  SINK: 监听 127.0.0.1:%d，等容器 feeder 连接…\n", port); fflush(stdout);
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0) { printf("  SINK: accept 失败: %s\n", strerror(errno)); return 9; }
+    /* accept 加 1s 超时 ⇒ SIGTERM 能把它打断（信号默认带 SA_RESTART，否则卡死不退）。 */
+    int nod = 1;
+    struct timeval rto = { 1, 0 };
+    setsockopt(lfd, SOL_SOCKET, SO_RCVTIMEO, &rto, sizeof rto);
+    int cfd = -1;
+    for (;;) {
+      cfd = accept(lfd, NULL, NULL);
+      if (cfd >= 0) break;
+      if (!g_sink_run) { printf("  SINK: 未连就收到退出信号\n"); return 0; }
+    }
+    setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nod, sizeof nod);
     printf("  SINK: feeder 已连\n"); fflush(stdout);
-    int nod = 1; setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nod, sizeof nod);
 
     SEND_CMD(2, 0);                                   /* start */
     if (wait_rpy_ms(rq, 2000)) TAKE_REPLY(rpy);
@@ -1730,7 +1738,23 @@ int auto_build(void* h) {
       int sr = select(cfd + 1, &rf, NULL, NULL, &tv);
       if (sr > 0 && ilen < (int)sizeof inbuf) {
         ssize_t n = read(cfd, inbuf + ilen, sizeof inbuf - (size_t)ilen);
-        if (n == 0) { printf("  SINK: feeder EOF（收流），退出\n"); break; }
+        if (n == 0) {
+          /* feeder 断了不能退出：接管轮里它每 3s 重连，我们退了这轮就没声音了。
+           * 流本身还在 HAL 里 ⇒ 关连接、重新 accept、再 start 一次（可能已 standby）就续上。 */
+          printf("  SINK: feeder EOF ⇒ 等重连（不退出）\n"); fflush(stdout);
+          close(cfd); cfd = -1; ilen = 0;
+          for (;;) {
+            cfd = accept(lfd, NULL, NULL);
+            if (cfd >= 0) break;
+            if (!g_sink_run) break;
+          }
+          if (cfd < 0) break;
+          setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nod, sizeof nod);
+          SEND_CMD(2, 0);
+          if (wait_rpy_ms(rq, 1500)) TAKE_REPLY(rpy);
+          printf("  SINK: feeder 重连，start -> Reply{state=%d}\n", rpy[2]); fflush(stdout);
+          continue;
+        }
         if (n > 0) ilen += (int)n;
       }
       /* 2) 本轮投多少：受 dataMQ 剩余空间 & 单次上限约束（帧=8B 输出） */
