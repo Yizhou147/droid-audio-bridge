@@ -646,3 +646,33 @@ RETSHEAP 0=0xb400007a…5b0*   ← vptr 解出来正是 _ZTVN4aidl…core11BpStr
 **继续用平台当解码器**：把 `op` 定位到各块起点调这些函数，拿到
 元素大小/保留计数/读写位置偏移，然后按 FMQ 协议写零帧，判据＝共享内存里的计数器推进 + HAL 无错。
 M3 之后才是 `aa-bridge` 换成"HAL sink"并接进 desk-takeover/desk-stop。
+
+### 22.7 【09-26 12:5x】回包结构读到了元素级，剩下的是 FMQ 几何
+
+533 字节回包的框架（int32 视图，0xee = 对象区，`AParcel_readByte` 拒绝裸读）：
+
+```
+00: ex=0
+04: 1 + [08..27 24字节对象 = IStreamOut 的 flat_binder_object]
+28: 1  2c: 492(0x1ec)            ← 后面这一大块的总长（0x28+492≈0x214=532 ✓ 整包收尾）
+三个 PFD 的 presence 落在 0xa8 / 0x14c / 0x1ec，**两两差 164** ⇒ 大块 = 3 × 164 字节的同型记录
+记录内容（fd 对象之后）：8, 1, 1, 160, 4, 1, 20, 0, 0, 8, 0, 1, 20, 0, 8, 8, 0, 1, 20, 0, 16, 8, …
+```
+
+类型线索（core-V4 导出，V2 同样有）：`StreamDescriptor` 及其**嵌套**
+`AudioBuffer / Reply / Command / Position` —— 这正是 HIDL 6.0 `IStreamOut` 的三队列 FMQ 协议
+（dataMQ 元素 = `AudioBuffer{u32 size; u32 reserved}`、replyMQ = `Reply{status, byteCount}`、
+controlMQ = `Command`），只是被搬进了 AIDL。三块 ashmem = 这三个队列：
+`fd9=4096, fd10=4096, fd11=16384`（**最大那块几乎必是 dataMQ**），头部 48 字节当前全 0
+（= 读写计数器都还在 0，没人写过）。
+
+`StreamDescriptor::readFromParcel`（0x52c90，372B）按 PLT 解出的读序：
+`getDataPosition → readInt32(尺寸校验) → readInt32 → readInt32 → 内部子读者(+0x174)
+→ readInt32 → readInt32 → readInt64 → readInt32 → 内部子读者(+0x308) → setDataPosition`。
+
+**未完成**：164 字节记录里"哪个数是 elementSize、哪个是 reservedElements、计数器偏移在哪"
+还没锁死。可选解法（按成本排序）：
+① 拿 16384 那块直接试写：FMQ 头部 `[u32 writePos][u32 readPos]`（或 u64 版）+ 紧跟元素区，
+   写一个 `AudioBuffer{0,0}` 并把 writePos+1，看 replyMQ 里有没有 `Reply{OK,0}` 冒出来 —— 一轮就能定形；
+② 反汇编 `libaudiohal_aidl.so` 的 StreamOut 写路径，看它往哪些偏移写（权威但要读大量汇编）；
+③ 放弃 A 路，改 **B′：接管轮根本不停音频栈**（anland 有声已实测闭环），FMQ 一层不碰。
