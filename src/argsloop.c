@@ -985,9 +985,9 @@ int auto_build(void* h) {
    *          ③ 之后所有 patch 都走平台读写，我们只按偏移改 id。 */
   if (flag("PP")) {
     void* gap = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule15"
-                  "getAudioPatchesEPNSt3__16vectorINS2_10AudioPatchENS5_9allocatorIS7_EEEE");
+                  "getAudioPatchesEPNSt3__16vectorINS3_10AudioPatchENS5_9allocatorIS7_EEEE");
     void* sap = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule13"
-                  "setAudioPatchERKNS3_10AudioPatchEPS7_");
+                  "setAudioPatchERKNS3_10AudioPatchEPS5_");
     void* prd = dlsym(h, "_ZN4aidl7android8hardware5audio4core10AudioPatch14readFromParcelEPK7AParcel");
     void* pwr = dlsym(h, "_ZNK4aidl7android8hardware5audio4core10AudioPatch13writeToParcelEP7AParcel");
     printf("  PP: gap=%p sap=%p read=%p write=%p\n", gap, sap, prd, pwr); fflush(stdout);
