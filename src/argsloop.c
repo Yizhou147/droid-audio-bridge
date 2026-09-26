@@ -302,12 +302,13 @@ int auto_build(void* h) {
   AIBinder* stream = NULL;
   for (int off = 0; off + 16 <= (int)sizeof(ret); off += 8) {
     void* cand = *(void**)(ret + off);
-    if ((uintptr_t)cand < 0x1000 || (uintptr_t)cand > 0x800000000000UL) continue;
+    if ((uintptr_t)cand < 0x1000 || (uintptr_t)cand >= (1UL<<48)) continue;   /* scudo 指针是 0xb400…，上界要放到 48 位 */
     void* vptr = *(void**)cand;
     if ((uintptr_t)vptr < 0x1000) continue;
     void* maybe = *(void**)((char*)cand + 8);
     if (!maybe) continue;
     AParcel* in3 = NULL; AParcel* out3 = NULL;
+    printf("  cand ret+%d = %p vptr=%p +8=%p\n", off, cand, vptr, maybe); fflush(stdout);
     if (!Prep2((AIBinder*)maybe, &in3)) {
       N.Parcel_writeInt32(in3, 0);
       int s3 = Tx2((AIBinder*)maybe, 1, &in3, &out3, 0);
