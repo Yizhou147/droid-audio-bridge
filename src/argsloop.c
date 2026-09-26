@@ -672,20 +672,34 @@ int auto_build(void* h) {
         long span = (long)(ve - vb);
         char* tmpl = NULL; int stride = 0;
         printf("  ACP: vector [%p..%p) span=%ld\n", (void*)vb, (void*)ve, span); fflush(stdout);
-        for (int cand = 32; cand <= 512 && !tmpl; cand += 8) {
+        /* stride 反推要**全元素校验**：上一版只看"最后一个元素 portId 命中"，
+         * 结果挑到半错位(struct 大小 272 时用了 136)，字段读成 (null) ⇒ HAL 回
+         * "requested ... do not match port's flags / not fully specified"。 */
+        for (int cand = 40; cand <= 512 && !tmpl; cand += 8) {
           if (span <= 0 || span % cand) continue;
-          int cnt = (int)(span / cand);
+          int cnt = (int)(span / cand), good = 0;
           for (int k = 0; k < cnt; k++) {
-            int id = *(int*)(vb + (long)k*cand), port = *(int*)(vb + (long)k*cand + 4);
-            if (id < 0 || id > 4096 || port < 0 || port > 4096) break;
-            if (k == cnt - 1 && port == want) { tmpl = vb + (long)k*cand; stride = cand; }
-          }
-          if (!tmpl && span % cand == 0) {
-            for (int k = 0; k < span/cand; k++) {
-              int port = *(int*)(vb + (long)k*cand + 4);
-              if (port == want) { tmpl = vb + (long)k*cand; stride = cand; break; }
+            char* e = vb + (long)k * cand;
+            int id = *(int*)e, port = *(int*)(e + 4), sr = *(int*)(e + 8), reach = *(int*)(e + 12);
+            int sr_ok = (sr == 0);
+            for (int q = 0; q < 8; q++) {
+              static const int SRS[8] = { 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 };
+              if (sr == SRS[q]) sr_ok = 1;
             }
+            if (sr == 48000 || sr == 64000 || sr == 88200 || sr == 96000 ||
+                sr == 128000 || sr == 176400 || sr == 192000) sr_ok = 1;
+            if (id >= 0 && id <= 4096 && port >= 1 && port <= 60 && sr_ok &&
+                reach >= 0 && reach <= 2) good++;
           }
+          if (good != cnt) continue;
+          for (int k = 0; k < cnt; k++) {
+            char* e = vb + (long)k * cand;
+            int port = *(int*)(e + 4);
+            printf("    stride=%d cfg[%d] id=%d portId=%d sr=%d\n", cand, k,
+                   *(int*)e, port, *(int*)(e + 8));
+            if (port == want && !tmpl) { tmpl = e; stride = cand; }
+          }
+          if (tmpl) break;
         }
         if (!sac) printf("  ACP: 没有 setAudioPortConfig 符号，跳过\n");
         else if (!tmpl) printf("  ACP: 模板法没命中（stride 反推失败）\n");
