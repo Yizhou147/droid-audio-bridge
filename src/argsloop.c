@@ -665,7 +665,7 @@ int auto_build(void* h) {
    * 写 writePos 之后如果对侧计数器动了 ⇒ 布局对 **且** 这条流真的活着。
    * 用的还是零采样数据（只动计数器），不会出声。
    *   Q=队列下标  W=字节偏移:值:宽度(4|8)  S=等待毫秒  D=1 只看不动 */
-  if (getenv("W") || getenv("Q")) {
+  if (getenv("W") || getenv("Q") || getenv("AW")) {
     int q = atoi(getenv("Q") ? getenv("Q") : "0");
     int woff = 0, wval = 0, wwid = 4;
     if (getenv("W")) sscanf(getenv("W"), "%d:%d:%d", &woff, &wval, &wwid);
