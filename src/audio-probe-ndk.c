@@ -230,7 +230,8 @@ int main(int argc, char** argv) {
             wI32(in2, 0);                /* IStreamCallback null */
             wI32(in2, 0);                /* IStreamOutEventCallback null */
           }
-          int st2 = N.Transact(b, 15, &in2, &out2, 0);
+          uint32_t txf = (uint32_t)strtoul(getenv("TXF") ? getenv("TXF") : "0", NULL, 0);  /* 0x10=ACCEPT_FDS：回包带 FMQ 的 fd 时必须 */
+          int st2 = N.Transact(b, 15, &in2, &out2, txf);
           int32_t ex2 = -1, h2 = -1;
           if (out2) { N.Parcel_readInt32(out2, &ex2); N.Parcel_readInt32(out2, &h2); }
           printf("ARGS2 TXF=%#x A=%d head=%d pres=%d env=%d → st=%d ex=%d first=%#x %s\n",
