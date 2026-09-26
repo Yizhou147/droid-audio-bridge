@@ -102,10 +102,15 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
     int (*rb)(const AParcel*, AIBinder**) =
       (int (*)(const AParcel*, AIBinder**))dlsym(N.ndk, "AParcel_readStrongBinder");
     int (*ri)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
+    N.Parcel_setPos(op, 0);          /* spill 把读位置推到了尾部 —— 不归零后面全是假失败 */
     int32_t ex = -1;
     if (ri) ri(op, &ex);
     if (rb) { AIBinder* st = NULL; if (rb(op, &st) == 0 && st) g_gstream = st; }
+    N.Parcel_setPos(op, 0);          /* 交还给平台代码自己解析 */
     printf("  [GOT] reply=%d 字节 ex=%d stream=%p\n", g_greply_len, ex, (void*)g_gstream);
+    for (int q = 0; q < g_greply_len && q < 96; q += 4)
+      printf("%02x:%08x ", q, *(uint32_t*)(g_greply + q));
+    printf("\n");
     fflush(stdout);
   }
   return r;
