@@ -327,3 +327,22 @@ int32，本量级无损；去掉用后读）。
 低 32 位可信、但报告值不可全信；而 **`openStream rc=0` 与"你确实听到了声音"这两条是真结论**
 （都在 open/write 正常返回的路径上）。⇒ 待办：拿修好的二进制在 anland 态**重跑一次**同一判据，
 把数字重新钉一遍。
+
+### 12.3 再下一层：桩链是 treadmill，不该继续补（判断依据）
+
+- `permission` 桩**一次都没被调**（`grep -c STUB-REQ = 0`）⇒ `-881/-898` 与它无关。
+- 关掉 mmap（`setprop aaudio.mmap_policy 0`）后传统路不再报错而是**挂在**：
+  `AudioStreamBuilder::build → AudioSystem::getMmapPolicyInfos →
+   mediautils::ServiceHandler::get<IAudioPolicyService>` 的 `condition_variable::wait_until`。
+- 不是 SELinux：`logcat -b events` 里客户端 `find media.audio_policy` **无 avc 拒绝**
+  （只有 `hal_audio_default` 读 `vendor_pd_locater_dbg_prop`/debugfs 这类 anland 也有的噪音）。
+- 真因方向＝**audioserver 的 binder 线程被别的 `waitForService` 占住**：同一时间窗里看到
+  `Waited one second for android.frameworks.sensorservice.ISensorManager/default`
+  与 `Binder transaction to android.media.IAudioFlingerService ... took 5004ms. Reply bytes: 0`。
+  `ISensorManager` 由 system_server 提供 ⇒ 轮内必缺 ⇒ 再补一个桩 ⇒ 再缺下一个。
+- ⇒ **结论（待用户定方向）**：继续补桩是"往无底洞里填沙"，且假答案可能让 AudioPolicy 静默走偏。
+  两条更靠谱的岔路：
+  A) **让 audioserver（连带它依赖的 system_server 侧服务）压根不被 stop**：把轮里的整颗 `stop`
+     换成按需逐个停（至少保 `surfaceflinger`+`zygote` 死、其余音频相关留着）——改动面大、需实测；
+  B) **回到直连 HAL**（§10.1 已存档权威布局，只差 `flags=0x10000000` 这一层没试）——
+     轮里 vendor HAL 本来就活着，不依赖任何 system_server 服务。
