@@ -1610,13 +1610,21 @@ int auto_build(void* h) {
       *(uint64_t*)(dq + 8) += (uint64_t)chunk;
       *(uint32_t*)(dq + dflag) |= 2;
       syscall(SYS_futex, dq + dflag, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
-      SEND_CMD(3, chunk);                              /* burst(N) */
+      int pay = flag("BURSTFR") ? chunk / 8 : chunk;   /* burst 的单位到底是字节还是帧？给个开关 A/B */
+      SEND_CMD(3, pay);                                /* burst(N) */
       usleep((useconds_t)slp * 1000u);
       TAKE_REPLY(rpy);
       printf("  SESSION 轮%d: 投 %d 字节 burst(%d) -> Reply{status=%d 消费=%d state=%d} "
-             "obs=%lld hw=%lld lat=%d xrun=%d data 读=%llu 写=%llu\n", iter, chunk, chunk,
+             "obs=%lld hw=%lld lat=%d xrun=%d data 读=%llu 写=%llu\n", iter, chunk, pay,
              rpy[0], rpy[1], rpy[2], (long long)obsFrames, (long long)hwFrames, latMs, xrun,
              (unsigned long long)*(uint64_t*)(dq + 0), (unsigned long long)*(uint64_t*)(dq + 8));
+      /* 队列几何的地面真值：命令/回包队列的读写计数器（字节）。
+       * HAL 每写一条 Reply 就让 rq+8 前进"元素宽度"⇒ 增量就是真实 elementSize，
+       * 不再靠猜（本轮 stall 的另一种解释就是我按 56 推进、实际是 64）。 */
+      printf("    CNT cmd 读=%llu 写=%llu | rpy 读=%llu 写=%llu | 映射 cq=%p rq=%p 大小 %zu/%zu\n",
+             (unsigned long long)*(uint64_t*)(cq + 0), (unsigned long long)*(uint64_t*)(cq + 8),
+             (unsigned long long)*(uint64_t*)(rq + 0), (unsigned long long)*(uint64_t*)(rq + 8),
+             (void*)cq, (void*)rq, g_qsz[0], g_qsz[1]);
       fflush(stdout);
     }
 #undef SEND_CMD
