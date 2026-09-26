@@ -110,6 +110,7 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
   }
   return r;
 }
+static const char* g_mod = "android.hardware.audio.core-V4-ndk.so";
 static int install_got_hook(const char* modname, void* real) {
   /* 槽地址 = 模块载入基址 + .rela.plt 给的静态偏移（AIBinder_transact = 0x5b400，
    * 由 pull 下来的 core-V4-ndk.so 反解 PLT 得到；调用点 openOutputStream+0xdc → bl plt(0x55ed8)）。 */
@@ -191,6 +192,7 @@ int main(int argc, char** argv) {
       !N.Parcel_writeInt32) { fprintf(stderr, "libbinder_ndk 符号缺\n"); return 3; }
 
   const char* lib = argc > 1 ? argv[1] : "/system/lib64/android.hardware.audio.core-V4-ndk.so";
+  g_mod = lib;
   void* h = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
   if (!h) { fprintf(stderr, "dlopen %s: %s\n", lib, dlerror()); return 4; }
   int (*readArgs)(void* self, const AParcel*) = (int(*)(void*, const AParcel*))dlsym(h,
@@ -272,7 +274,7 @@ int main(int argc, char** argv) {
   if (getenv("GOT")) {
     g_orig_tx = (void*)dlsym(N.ndk, "AIBinder_transact");
     printf("GOT 钩子安装：real=%p\n", g_orig_tx); fflush(stdout);
-    install_got_hook(lib, g_orig_tx);
+    install_got_hook(g_mod, g_orig_tx);
     g_gotcap = 1;
   }
   if (getenv("CAP")) { g_cap = 1; }
@@ -494,7 +496,7 @@ int auto_build(void* h) {
       printf("GOT 预热 getAudioPorts vec=[%p,%p]\n", *(void**)&vec[0], *(void**)&vec[8]); fflush(stdout);
     } else printf("GOT 预热：没找到 getAudioPorts 符号\n");
     printf("GOT 安装：real=%p\n", g_orig_tx); fflush(stdout);
-    install_got_hook(lib, g_orig_tx);
+    install_got_hook(g_mod, g_orig_tx);
     g_gotcap = 1;
   }
   call_sret3(openOut, bp, args, ret, sret);
