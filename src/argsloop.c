@@ -1027,6 +1027,126 @@ int auto_build(void* h) {
     }
   }
 
+  /* ===== VP=1：VendorParameter 的"平台代打"（事务码 33/34）=====
+   * 下半对喇叭（bl/br）只有 MI 层收到 speaker 的 vendor 参数才会开增益：
+   *   MiModulePrimary::setVendorParameters 里 speaker_number = default/top/bottom/
+   *   tl-spk/tr-spk/bl-spk/br-spk，配套日志 "set gain to 817: 0db / 785: -4db / 721: -12db / 55 / 49"；
+   *   框架放媒体时推的是 audio_volume_stream_music_device_speaker=<index>（09-26 实测 9/10/11）。
+   * 手搓 List<VendorParameter> 字节风险高（TaggedUnion 布局未知），所以沿用 AudioPatch 那套：
+   *   ① 平台自己的 getVendorParameters 把对象解出来（顺带实测 stride）
+   *   ② VPPOKE/VPPOKEQ 按偏移改值  ③ 平台 setVendorParameters 发出去。
+   * VPRST=1 ⇒ 只折腾参数不开流（静默）。 */
+  if (flag("VP")) {
+    void* gvp = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule19getVendorParametersERKNSt3__16vectorINS5_12basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEENSA_ISC_EEEEPNS6_INS3_15VendorParameterENSA_ISH_EEEE");
+    void* svp = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule19setVendorParametersERKNSt3__16vectorINS3_15VendorParameterENS5_9allocatorIS7_EEEEb");
+    printf("  VP: get=%p set=%p\n", gvp, svp); fflush(stdout);
+    static char idsvec[24];
+    static char sarr[4][24];
+    int nid = 0;
+    if (getenv("VPIDS")) {
+      char idsbuf[256]; strncpy(idsbuf, getenv("VPIDS"), sizeof idsbuf - 1);
+      idsbuf[sizeof idsbuf - 1] = 0;
+      char* w = strtok(idsbuf, ",");
+      while (w && nid < 4) {
+        size_t L = strlen(w);
+        char* p = (char*)malloc(L + 1);
+        memcpy(p, w, L + 1);
+        *(uint64_t*)(sarr[nid] + 0) = ((uint64_t)(L + 1) << 1) | 1;   /* libc++ 长串: cap<<1|1 */
+        *(uint64_t*)(sarr[nid] + 8) = L;
+        *(char**)(sarr[nid] + 16) = p;
+        printf("  VP: id[%d]=\"%s\" len=%zu\n", nid, w, L);
+        nid++; w = strtok(NULL, ",");
+      }
+      *(void**)idsvec = (void*)&sarr[0];
+      *(void**)(idsvec + 8) = (void*)&sarr[0] + nid * 24;
+      *(void**)(idsvec + 16) = *(void**)(idsvec + 8);
+    }
+    static char ov[24];                       /* out: vector<VendorParameter> */
+    static char vws[32];
+    if (flag("VPCAP") && gvp && nid > 0) {
+      memset(ov, 0, sizeof ov); memset(vws, 0, sizeof vws);
+      int ovc = g_capcode; g_capcode = -1;
+      call_sret3(gvp, bp, idsvec, ov, vws);
+      g_capcode = ovc;
+      void* sv = *(void**)vws;
+      int (*gvst)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+      int (*gvex)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getExceptionCode");
+      const char* (*gvmsg)(const void*) = (const char*(*)(const void*))dlsym(N.ndk, "AStatus_getMessage");
+      printf("  VP: getVendorParameters st=%d ex=%d msg=\"%s\"\n",
+             sv && gvst ? gvst(sv) : -999, sv && gvex ? gvex(sv) : -999,
+             sv && gvmsg && gvmsg(sv) ? gvmsg(sv) : "");
+      char* b0 = *(char**)(ov + 0); char* e0 = *(char**)(ov + 8);
+      long span = b0 && e0 ? (long)(e0 - b0) : -1;
+      printf("  VP: out vector=[%p,%p) span=%ld\n", (void*)b0, (void*)e0, span);
+      for (int cnt = 1; cnt <= 6 && span > 0; cnt++) {
+        if (span % cnt) continue;
+        long st = span / cnt;
+        if (st >= 24 && st <= 256 && st % 8 == 0) printf("  VP: 候选 count=%d stride=%ld\n", cnt, st);
+      }
+      int vcnt = getenv("VCNT") ? atoi(getenv("VCNT")) : 1;
+      if (span > 0 && vcnt > 0 && span % vcnt == 0) {
+        long stride = span / vcnt;
+        for (int e = 0; e < vcnt; e++) {
+          char* o = b0 + (long)e * stride;
+          printf("  VP obj%d +%d:", e, (int)(o - b0));
+          for (int q = 0; q + 8 <= stride; q += 8) printf(" 0x%016llx", (unsigned long long)*(uint64_t*)(o + q));
+          printf("\n");
+          for (int q = 0; q + 8 <= stride; q += 8) {
+            void* cand = *(void**)(o + q);
+            if (!readable(cand)) continue;
+            char* cs = (char*)cand;
+            int ok = 1;
+            for (int t = 0; t < 40 && cs[t]; t++) if ((unsigned char)cs[t] < 0x20 || (unsigned char)cs[t] > 0x7e) { ok = 0; break; }
+            if (ok && cs[0]) printf("      +%2d 指针 %p -> \"%s\"\n", q, cand, cs);
+            else { int* ip = (int*)cand; if (readable(ip + 1)) printf("      +%2d 指针 %p -> [%d,%d]\n", q, cand, ip[0], ip[1]); }
+          }
+        }
+      }
+      fflush(stdout);
+    }
+    char* vp1 = getenv("VPPOKE");
+    if (vp1 && *(char**)(ov + 0)) {
+      char* w = strtok(vp1, ",");
+      while (w) {
+        long off = 0; long long val = 0;
+        if (sscanf(w, "%ld:%lld", &off, &val) == 2 && off >= 0 && off + 4 <= 256) {
+          *(int32_t*)(*(char**)(ov + 0) + off) = (int32_t)val;
+          printf("  VP: POKE +%ld=%lld\n", off, val);
+        }
+        w = strtok(NULL, ",");
+      }
+      fflush(stdout);
+    }
+    char* vp2 = getenv("VPPOKEQ");
+    if (vp2 && *(char**)(ov + 0)) {
+      char* w = strtok(vp2, ",");
+      while (w) {
+        long off = 0; long long val = 0;
+        if (sscanf(w, "%ld:%lld", &off, &val) == 2 && off >= 0 && off + 8 <= 256) {
+          *(uint64_t*)(*(char**)(ov + 0) + off) = (uint64_t)val;
+          printf("  VP: POKEQ +%ld=0x%llx\n", off, (unsigned long long)val);
+        }
+        w = strtok(NULL, ",");
+      }
+      fflush(stdout);
+    }
+    if (flag("VPSEND") && svp && *(char**)(ov + 0)) {
+      static char vws2[32]; memset(vws2, 0, sizeof vws2);
+      int async = getenv("VPASYNC") ? atoi(getenv("VPASYNC")) : 0;
+      int ovc2 = g_capcode; g_capcode = -1;
+      call_sret3(svp, bp, ov, (void*)(intptr_t)async, vws2);
+      g_capcode = ovc2;
+      void* sv2 = *(void**)vws2;
+      int (*gs2)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+      int (*ge2)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getExceptionCode");
+      const char* (*gm2)(const void*) = (const char*(*)(const void*))dlsym(N.ndk, "AStatus_getMessage");
+      printf("  VP: setVendorParameters(async=%d) st=%d ex=%d msg=\"%s\"\n", async,
+             sv2 && gs2 ? gs2(sv2) : -999, sv2 && ge2 ? ge2(sv2) : -999,
+             sv2 && gm2 && gm2(sv2) ? gm2(sv2) : ""); fflush(stdout);
+    }
+    if (flag("VPRST")) { printf("  VP: VPRST ⇒ 不开流退出\n"); fflush(stdout); return 0; }
+  }
+
   /* ===== PP=1：AudioPatch 的"平台代打"实验 =====
    * 手搓 4 种打包全被拒（-22 = HAL 侧 Parcel::read 失败；免 size 那版 0x80000008），
    * 所以改成：① 用平台自己的 BpModule::getAudioPatches 读出 5 条真 patch 的 C++ 对象，
