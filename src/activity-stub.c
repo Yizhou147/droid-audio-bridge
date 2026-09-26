@@ -30,6 +30,8 @@ static struct {
 #define S(field, name) do { *(void**)&N.field = dlsym(N.h, name); \
   if (!N.field) fprintf(stderr, "missing %s\n", name); } while (0)
 
+static int g_pad = 12;                      /* 回复补零个数，PAD 环境变量可调 */
+
 static void noop_create(void* arg) { (void)arg; }
 static void noop_destroy(void* arg) { (void)arg; }
 /* 一律"成功+空回复"：调用方需要的 void 方法（registerUidObserver 等）即可通过。
@@ -49,7 +51,12 @@ static int32_t on_transact(AIBinder* binder, uint32_t code, const AParcel* in, A
     printf("STUB-REQ code=0x%x\n", code);
   }
   fflush(stdout);
-  if (out && wI32) wI32(out, 0);            /* exception = EX_NONE */
+  if (out && wI32) {
+    wI32(out, 0);                            /* exception = EX_NONE */
+    /* 客户端读完异常头还要读返回值；空回复会 FAILED_TRANSACTION。补零：
+     * int/long=0、bool=false、可空对象/List=null、String16 长度 0=空串，都是安全值。 */
+    for (int i = 0; i < g_pad; i++) wI32(out, 0);
+  }
   return 0;
 }
 
@@ -57,6 +64,7 @@ int main(void) {
   const char* name = getenv("STUB_NAME") ? getenv("STUB_NAME") : "activity";
   const char* desc = getenv("STUB_DESC") ? getenv("STUB_DESC") : "android.app.IActivityManager";
   int alive = getenv("ALIVE") ? atoi(getenv("ALIVE")) : 45;
+  if (getenv("PAD")) g_pad = atoi(getenv("PAD"));
   N.h = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_GLOBAL);
   if (!N.h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
   S(Class_define, "AIBinder_Class_define");
