@@ -672,7 +672,9 @@ int auto_build(void* h) {
         memcpy(elem, g_cfg + found, (size_t)sz);
         *(int32_t*)(elem + 4) = 0;                              /* id=0 ⇒ 新建 */
         AParcel* in5 = NULL; AParcel* out5 = NULL;
-        if (!Prep2(b, &in5)) {
+        int (*Prep5)(AIBinder*, AParcel**) =
+          (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
+        if (Prep5 && !Prep5(b, &in5)) {
           wI32(in5, 0);                                         /* 异常位 */
           wI32(in5, 8 + sz);                                    /* 数组整体大小 */
           wI32(in5, 1);                                         /* 元素个数 */
