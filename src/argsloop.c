@@ -93,6 +93,13 @@ static int g_gotcap;
 static uint8_t g_greply[8192];
 static int g_greply_len;
 static AIBinder* g_gstream;
+static int g_nq;                       /* GOT 抓到的 FMQ 队列数 */
+static int g_qfd[4];
+static void* g_qmem[4];
+static size_t g_qsz[4];
+static void qput(int fd, void* m, size_t sz) {
+  if (g_nq < 4 && m && m != MAP_FAILED) { g_qfd[g_nq] = fd; g_qmem[g_nq] = m; g_qsz[g_nq] = sz; g_nq++; }
+}
 static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32_t flags) {
   int (*o)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) =
     (int (*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))g_orig_tx;
@@ -140,6 +147,7 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
             m = t; good = sz; sz *= 2;
           }
           printf("  [GOT]   mmap 大小=%zu 地址=%p\n", good, m);
+          qput(fd, m, good);
           if (m != MAP_FAILED) {
             const uint8_t* q = (const uint8_t*)m;
             for (int t = 0; t < 48; t += 8)
@@ -653,6 +661,35 @@ int auto_build(void* h) {
     (int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))dlsym(N.ndk, "AIBinder_transact");
   int (*rFd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
   int (*rFd2)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readFileDescriptor");
+  /* 一次就能定形的实验：FMQ 头部要么是 [u32 writePos][u32 readPos]，要么是 [u64][u64]。
+   * 写 writePos 之后如果对侧计数器动了 ⇒ 布局对 **且** 这条流真的活着。
+   * 用的还是零采样数据（只动计数器），不会出声。
+   *   Q=队列下标  W=字节偏移:值:宽度(4|8)  S=等待毫秒  D=1 只看不动 */
+  if (getenv("W") || getenv("Q")) {
+    int q = atoi(getenv("Q") ? getenv("Q") : "0");
+    int woff = 0, wval = 0, wwid = 4;
+    if (getenv("W")) sscanf(getenv("W"), "%d:%d:%d", &woff, &wval, &wwid);
+    printf("队列抓到 %d 个；选中 %d\n", g_nq, q);
+    for (int i = 0; i < g_nq; i++) {
+      uint8_t* b = (uint8_t*)g_qmem[i];
+      printf("  前 q%d(fd %d, %zu) :", i, g_qfd[i], g_qsz[i]);
+      for (int t = 0; t < 32; t += 4) printf(" %d:%u", t, *(uint32_t*)(b + t));
+      printf("\n");
+    }
+    if (q < g_nq && getenv("W") && !getenv("D")) {
+      uint8_t* b = (uint8_t*)g_qmem[q];
+      if (wwid == 8) *(uint64_t*)(b + woff) = (uint64_t)wval; else *(uint32_t*)(b + woff) = (uint32_t)wval;
+      printf("  写了 q%d +%d = %d (宽%d)\n", q, woff, wval, wwid);
+      usleep((getenv("S") ? atoi(getenv("S")) : 1000) * 1000);
+      for (int i = 0; i < g_nq; i++) {
+        uint8_t* b2 = (uint8_t*)g_qmem[i];
+        printf("  后 q%d(fd %d) :", i, g_qfd[i]);
+        for (int t = 0; t < 32; t += 4) printf(" %d:%u", t, *(uint32_t*)(b2 + t));
+        printf("\n");
+      }
+    }
+    fflush(stdout);
+  }
   hunt_fds("Return(平台解析后的结构)", ret, 512);
   hunt_fds("greply(抓到的原始回包)", g_greply, g_greply_len);
   AIBinder* stream = NULL;
