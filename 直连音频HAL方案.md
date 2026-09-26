@@ -368,3 +368,19 @@ int32，本量级无损；去掉用后读）。
 ⇒ **纪律**：不再靠猜形状试错（每轮一次 CI 太贵）。下一步只有两条正路：
 A) 拿**地面真值**——dlopen 平台自带 AIDL 客户端（`libaudiohal`/`AudioHalAidl`）在桥进程里直调，让平台自己打包（成了就连手搓都不用）；
 B) 回到"让 audioserver（及 system_server 侧依赖）不被 stop"的路，AAudio 直接复用平台栈（anland 态已真出声，只差轮内服务保活）。
+
+## 14. 【09-26 上午·B 路负结果，先记录再决策】轮内"冷启动整套框架"天生残缺
+
+在同一轮里依次补齐后实测（全零静音，无一次出声）：
+
+| 步骤 | 结果 |
+|---|---|
+| 补 4 个桩（activity / sensor_privacy / permission / ISensorManager 后 audioserver 冷启动 | `media.audio_flinger`、`media.aaudio`、`media.audio_policy` 全部 found；探针不再挂死、**立刻**回 `-881 AAUDIO_ERROR_NO_SERVICE` |
+| 让栈沉降 55 s（HAL 28154、audioserver 28153 双次采样不变） | 仍 `-881` ⇒ 不是重启窗口竞态 |
+| `dumpsys media.audio_policy` / `media.audio_flinger` | 引擎有 `Available output devices (3)`、`AudioOut_D`（handle 13，设备 0x2 SPEAKER）存在 ⇒ "没有输出"不成立，`-881`（NAME_NOT_FOUND 侧）另有其因 |
+| 拉起 `hwservicemanager`（HAL 日志出现过 `... without hwservicemanager`） | **拉不起来**：`ctl.start hwservicemanager` 后仍 `stopped`、无 pid ⇒ 与 §38 记的 `system_suspend`"ctl.stop 后 start 拉不起"同类 |
+
+⇒ **B 路真正的结论**：`stop` 之后靠 `ctl.start` 复原**不可能完备**——`hwservicemanager`/`system_suspend` 这类服务一旦被整颗 `stop` 带走就无法按名复活，
+而音频栈要用到它们；再加 4 个桩也只是把 audioserver 的初始化糊过去，AAudio 仍拿不到流。
+⇒ 于是 B 只剩一种可行形态：**不让 `stop` 碰它们**（把整颗 `stop` 改成按需逐个停），这需要改 `desk-takeover.sh` 并实跑一轮验证。
+A 路（直连 HAL）不受此影响：HAL 在轮里本来就活着且可服务（`getAudioPorts` 稳定回 19164B/816B），只差 `Arguments` 那一处布局。
