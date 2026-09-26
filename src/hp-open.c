@@ -82,6 +82,19 @@ int main(int argc, char** argv) {
   CtorBpModule(bp, &b);
   printf("DIAG BpModule 构造完 vptr=%p\n", *(void**)bp); fflush(stdout);
 
+  if (getenv("GP")) {   /* 自检：调平台 BpModule::getAudioPorts——它必然在 HAL 侧打日志并填 vector */
+    int (*gaps)(void*, void*) = (int(*)(void*,void*))dlsym(h,
+      "_ZN4aidl7android8hardware5audio4core8BpModule13getAudioPortsEPNSt3__16vectorINS0_5media5audio6common9AudioPortENS5_9allocatorIS7_EEEE");
+    if (!gaps) { fprintf(stderr, "没有 getAudioPorts 符号\n"); return 7; }
+    static char vec[32]; memset(vec, 0, sizeof vec);
+    static char sr2[32];
+    call_sret3((void*)gaps, bp, vec, vec, sr2);   /* 该签名 2 参：this, vector*；多传的 x2/x3 无害 */
+    void* so = *(void**)sr2;
+    int g = so ? ((int32_t(*)(const void*))dlsym(ndk, "AStatus_getStatus"))(so) : 0;
+    printf("GAPS st=%d vec=[%p,%p,%p]\n", g, *(void**)&vec[0], *(void**)&vec[8], *(void**)&vec[16]);
+    fflush(stdout);
+    return g == 0 && *(void**)&vec[8] != NULL ? 0 : 8;
+  }
   static char sret[32]; memset(sret, 0, sizeof sret);
   call_sret3((void*)openOut, bp, args, ret, sret);
   void* stobj = *(void**)sret;
