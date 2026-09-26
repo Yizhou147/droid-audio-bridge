@@ -949,6 +949,42 @@ int auto_build(void* h) {
   /* WATCH=毫秒数：高频比对三块队列前 256 字节，抓"谁在动这块共享内存"。
      纯读、不发事务、不写一帧 ⇒ 无声。判据另有两路：
      THR 行（write_db 的累计 CPU）+ /proc/<tid>/syscall 的 futex 地址。 */
+  /* GRANT=1：用平台自己的 GrantorDescriptor::readFromParcel 把回包里的 grantor 列表逐条解出来。
+   * 为什么必须这样：libfmq 的 initMemory() 里
+   *   mReadPtr / mWritePtr / mEvFlagWord ← mapGrantorDescr(READPTRPOS/WRITEPTRPOS/EVFLAGWORDPOS)
+   *   mRing                           ← mapGrantorDescr(DATAPTRPOS)
+   * 而生成端对 DATAPTRPOS 写的是 **fdIndex=1、offset=0**，其余 fdIndex=0
+   * ⇒ 数据区和计数器/事件字**可能不在同一块 fd 里** —— 我们此前把三个 fd 直接当成三块队列，
+   * 很可能一直是"在 metadata 区里找元素槽"，那当然没人理。 */
+  if (getenv("GRANT") && g_greply_len > 0) {
+    void* hfmq = dlopen("/system/lib64/android.hardware.common.fmq-V1-ndk.so", RTLD_NOW | RTLD_GLOBAL);
+    int (*rdG)(void*, const AParcel*) = (int(*)(void*, const AParcel*))dlsym(
+        hfmq ? hfmq : N.ndk,
+        "_ZN4aidl7android8hardware6common3fmq17GrantorDescriptor14readFromParcelEPK7AParcel");
+    if (!rdG) printf("  GRANT: 缺 GrantorDescriptor::readFromParcel（hfmq=%p）\n", hfmq);
+    else {
+      AParcel* gp = NULL;
+      if (N.Prepare ? 0 : 0) {}
+      gp = N.Parcel_create();
+      /* 直接在抓到的原始回包字节上重建一个只含该元素的 parcel 太麻烦 ——
+       * 换个稳妥办法：对**当前 reply AParcel** 逐位置尝试读一个 GrantorDescriptor。
+       * g_greply 只是抄出来的字节，读不了对象；这里用 *out（平台还回来的那个）不行（已被解析）。
+       * 所以：用字节自己造 parcel（回包里 grantor 区没有 fd/binder 对象 ⇒ 可完整重建）。 */
+      for (int pos = 0; pos + 4 <= g_greply_len; pos += 4) {
+        int32_t sz = *(int32_t*)(g_greply + pos);
+        if (sz != 20 && sz != 24) continue;
+        if (pos + sz > g_greply_len) continue;
+        static char gobj[64];
+        memset(gobj, 0, sizeof gobj);
+        printf("  GRANT @%d size=%d 原始:", pos, sz);
+        for (int t = 0; t < sz; t += 4) printf(" %d", *(int32_t*)(g_greply + pos + t));
+        printf("\n    → 对象里:");
+        fflush(stdout);
+        (void)gobj;
+      }
+    }
+  }
+
   if (getenv("WATCH") && getenv("GOT") && g_nq) {
     int ms = atoi(getenv("WATCH"));
     static uint8_t snap[4][256];

@@ -13,7 +13,7 @@ sleep 3
 echo "audioserver=$(getprop init.svc.audioserver)"
 logcat -c
 DBG=1 APC=1 APCPORT=2 LOAD="$LOADF" GOT=1 AUTO=1 TRANSACT=1 STREAM=1 \
-  Q=2 W="$CNT:$BW:8" FK=1 WALL=1 FOFF="${FOFF:-16400}" FVAL="${FVAL:-2}" THR=1 S="${S:-3000}" \
+  Q="${QI:-2}" W="$CNT:$BW:8" FK=1 WALL=1 FOFF="${FOFF:-16400}" FVAL="${FVAL:-2}" THR=1 S="${S:-3000}" \
   SVC=android.hardware.audio.core.IModule/default \
   IN="55;1;8;0;0;L:2048;B;B" timeout 30 /data/local/tmp/argsloop > "$M" 2>&1
 grep -a -E 'LOAD:|PFD@|q[0-9]|写了|FK:' "$M" | head -22
