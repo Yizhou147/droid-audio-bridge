@@ -963,25 +963,17 @@ int auto_build(void* h) {
         "_ZN4aidl7android8hardware6common3fmq17GrantorDescriptor14readFromParcelEPK7AParcel");
     if (!rdG) printf("  GRANT: 缺 GrantorDescriptor::readFromParcel（hfmq=%p）\n", hfmq);
     else {
-      AParcel* gp = NULL;
-      if (N.Prepare ? 0 : 0) {}
-      gp = N.Parcel_create();
-      /* 直接在抓到的原始回包字节上重建一个只含该元素的 parcel 太麻烦 ——
-       * 换个稳妥办法：对**当前 reply AParcel** 逐位置尝试读一个 GrantorDescriptor。
-       * g_greply 只是抄出来的字节，读不了对象；这里用 *out（平台还回来的那个）不行（已被解析）。
-       * 所以：用字节自己造 parcel（回包里 grantor 区没有 fd/binder 对象 ⇒ 可完整重建）。 */
-      for (int pos = 0; pos + 4 <= g_greply_len; pos += 4) {
+      /* grantor 记录里没有 fd/binder 对象 ⇒ 原始字节可整块读出来直接看：
+       * GrantorDescriptor = [int32 size][int32 fdIndex][int32 offset][int64 extent] */
+      for (int pos = 0; pos + 20 <= g_greply_len; pos += 4) {
         int32_t sz = *(int32_t*)(g_greply + pos);
-        if (sz != 20 && sz != 24) continue;
-        if (pos + sz > g_greply_len) continue;
-        static char gobj[64];
-        memset(gobj, 0, sizeof gobj);
-        printf("  GRANT @%d size=%d 原始:", pos, sz);
+        if ((sz != 20 && sz != 24) || pos + sz > g_greply_len) continue;
+        printf("  GRANT @%d size=%d fdIndex=%d offset=%d words:", pos, sz,
+               *(int32_t*)(g_greply + pos + 4), *(int32_t*)(g_greply + pos + 8));
         for (int t = 0; t < sz; t += 4) printf(" %d", *(int32_t*)(g_greply + pos + t));
-        printf("\n    → 对象里:");
-        fflush(stdout);
-        (void)gobj;
+        printf("\n");
       }
+      fflush(stdout);
     }
   }
 
