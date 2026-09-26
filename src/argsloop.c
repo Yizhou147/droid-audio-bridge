@@ -637,6 +637,63 @@ int auto_build(void* h) {
     install_got_hook(g_mod, g_orig_tx);
     g_gotcap = 1;
   }
+  /* ===== APC=1：给容器自己建一份 AudioPortConfig =====
+   * 框架把 54~63 那些现成 config 都占着（直开会被拒：ex=-3 EX_ILLEGAL_ARGUMENT +
+   * HAL 明说 "already has a stream opened on it"），所以必须先自己创建一份再开流。
+   * 全程让平台编解码：我只在元素头上动两个 int32（id / 读 portId），不逆完整结构。 */
+  if (getenv("APC")) {
+    int want = getenv("APCPORT") ? atoi(getenv("APCPORT")) : 2;   /* 2 = deep_buffer_out */
+    void* gapc = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule19"
+                  "getAudioPortConfigsEPNSt3__16vectorINS0_5media5audio6common"
+                  "15AudioPortConfigENS5_9allocatorISA_EEEE");
+    int (*wI32)(AParcel*, int32_t) = (int(*)(AParcel*, int32_t))N.Parcel_writeInt32;
+    if (!gapc) printf("  APC: 缺 getAudioPortConfigs 符号\n");
+    else {
+      static char vec[64]; memset(vec, 0, sizeof vec);
+      static char vs[32]; memset(vs, 0, sizeof vs);
+      g_capcode = 10; g_cfg_len = 0; g_gotcap = 1;
+      call_sret3(gapc, bp, vec, vec, vs);
+      printf("  APC: getAudioPortConfigs 抄到 %d 字节 vec=[%p,%p]\n", g_cfg_len,
+             *(void**)&vec[0], *(void**)&vec[8]); fflush(stdout);
+      int n = g_cfg_len > 8 ? *(int*)(g_cfg + 8) : 0;           /* [ex][arrSize][count] */
+      int o = 12, found = -1;
+      for (int k = 0; k < n && o + 12 <= g_cfg_len; k++) {
+        int sz = *(int*)(g_cfg + o), id = *(int*)(g_cfg + o + 4), port = *(int*)(g_cfg + o + 8);
+        if (k < 6 || port == want)
+          printf("    cfg[%d] size=%d id=%d portId=%d%s\n", k, sz, id, port,
+                 port == want ? "  <== 选中" : "");
+        if (port == want && found < 0) found = o;
+        o += sz;
+      }
+      if (found < 0) printf("  APC: 没找到 portId=%d 的现成 config\n", want);
+      else {
+        int sz = *(int*)(g_cfg + found);
+        static uint8_t elem[4096];
+        memcpy(elem, g_cfg + found, (size_t)sz);
+        *(int32_t*)(elem + 4) = 0;                              /* id=0 ⇒ 新建 */
+        AParcel* in5 = NULL; AParcel* out5 = NULL;
+        if (!Prep2(b, &in5)) {
+          wI32(in5, 0);                                         /* 异常位 */
+          wI32(in5, 8 + sz);                                    /* 数组整体大小 */
+          wI32(in5, 1);                                         /* 元素个数 */
+          for (int t = 0; t < sz; t += 4) { int32_t v; memcpy(&v, elem + t, 4); wI32(in5, v); }
+          g_capcode = 18; g_cfg_len = 0;
+          int st5 = ((int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))g_orig_tx)
+                      (b, 18, &in5, &out5, 0);
+          printf("  APC: setAudioPortConfig(18) st=%d 回包 %d 字节\n", st5, g_cfg_len);
+          fflush(stdout);
+          if (g_cfg_len >= 16) {
+            int nid = *(int*)(g_cfg + 12 + 4);
+            printf("  APC: ★新 portConfigId = %d（portId=%d，只有我们在用）\n", nid, want);
+            N.Parcel_setPos(args, 8); wI32(args, nid); N.Parcel_setPos(args, 0);
+            fflush(stdout);
+          }
+        }
+      }
+      g_capcode = 15;
+    }
+  }
+
   call_sret3(openOut, bp, args, ret, sret);
   if (getenv("GOT")) {
     g_gotcap = 0;
