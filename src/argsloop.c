@@ -701,11 +701,44 @@ int auto_build(void* h) {
           }
           if (tmpl) break;
         }
+        /* NOPRE=1：不带模板，交一份**自己填**的 AudioPortConfig（接管轮里框架 config 数为 0，
+         * 只能自己来）。POKE=off:val[,off:val...] 直接往 C++ 结构的任意 int32 偏移写值 ——
+         * HAL 会把收到的结构逐字段明文打回来，所以偏移对不对一眼可判，几轮就能试完。 */
+        if (getenv("NOPRE")) {
+          static char my[512]; memset(my, 0, sizeof my);
+          *(int32_t*)(my + 0) = 0;                     /* id = 0 ⇒ 新建 */
+          *(int32_t*)(my + 4) = want;                  /* portId */
+          char* pk = getenv("POKE");
+          if (pk) {
+            char* w = strtok(pk, ",");
+            while (w) {
+              int off = 0, val = 0;
+              if (sscanf(w, "%d:%d", &off, &val) == 2 && off >= 0 && off + 4 <= (int)sizeof my) {
+                *(int32_t*)(my + off) = val;
+                printf("  NOPRE: 写 +%d = %d\n", off, val);
+              }
+              w = strtok(NULL, ",");
+            }
+          }
+          static char ro[512]; memset(ro, 0, sizeof ro);
+          static char ok2[8]; static char st8[64];
+          g_capcode = 18; g_cfg_len = 0;
+          call_sret4(sac, bp, my, ro, ok2, st8);
+          void* sv8 = *(void**)st8;
+          int (*gst8)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+          printf("  NOPRE: st=%d ok=%d 回传出 8 int32:", sv8 && gst8 ? gst8(sv8) : -999, *(int*)ok2);
+          for (int t = 0; t < 8; t++) printf(" %d", *(int*)(ro + 4*t));
+          printf("\n"); fflush(stdout);
+          if (*(int*)ro > 0) printf("  NOPRE: ★新 portConfigId = %d\n", *(int*)ro);
+          g_capcode = 15;
+          tmpl = my;   /* 复用后面的分支，不再走模板路径 */
+
+        }
         if (!sac) printf("  ACP: 没有 setAudioPortConfig 符号，跳过\n");
-        else if (!tmpl) printf("  ACP: 模板法没命中（stride 反推失败）\n");
+        else if (!tmpl || getenv("NOPRE")) printf("  ACP: 模板法没命中（stride 反推失败）\n");
         else {
-          int oldid = *(int*)tmpl;
-          printf("  ACP: 模板=stride %d 里的 id=%d portId=%d ⇒ 克隆并清 id\n", stride, oldid, want);
+          int oldid = *(int*)tmpl; (void)oldid;
+          printf("  ACP: 模板=stride %d 里的 id=%d portId=%d ⇒ 克隆并清 id\n", stride, oldid, want); fflush(stdout);
           *(int*)tmpl = 0;
           static char res3[512]; memset(res3, 0, sizeof res3);
           static char ok3[8]; memset(ok3, 0, sizeof ok3);
