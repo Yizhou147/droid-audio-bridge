@@ -1049,6 +1049,16 @@ int auto_build(void* h) {
       static uint8_t lb[1024];
       int ln = fp ? (int)fread(lb, 1, sizeof lb, fp) : -1;
       if (fp) fclose(fp);
+      /* SAVEP 时 spill 只能读出 29/32 字节 ⇒ 先补齐到元素自己声明的长度，
+       * 否则 readFromParcel 因缺尾字节返回 -61（这次侥幸能用，但别赌）。 */
+      if (ln > 4) {
+        int decl = *(int*)lb;
+        if (decl > ln && decl <= (int)sizeof lb) {
+          memset(lb + ln, 0, decl - ln);
+          printf("  PP: LOADP 补齐 %d -> %d 字节\n", ln, decl);
+          ln = decl;
+        }
+      }
       printf("  PP: LOADP %s 读到 %d 字节\n", getenv("LOADP"), ln); fflush(stdout);
       if (ln > 4) {
         AParcel* ip = N.Parcel_create();
