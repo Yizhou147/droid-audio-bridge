@@ -5,6 +5,9 @@
  * 用法：su -c 'IN=0,44,1,8,0,0,0,0,0,0,0 /data/local/tmp/argsloop [lib路径] [service名]'
  *       TRANSACT=1 才真的发事务（默认关；且只对指定 service 发，绝不放音——args 不含任何采样数据）。
  * 只读、不发声。 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -28,6 +31,39 @@ __asm__(
 ".previous\n"
 );
 extern void call_sret3(void* fn, void* a0, void* a1, void* a2, void* sret);
+
+/* 符号插桩：可执行文件导出的同名符号在全局作用域里优先，平台 Bp 码经 PLT 调 AIBinder_transact
+ * 时会先进这里 ⇒ 转发给真实现，并在返回前把 reply parcel 抄下来（里面有 IStreamOut 与 FMQ 的 fd）。 */
+static void spill(AParcel* p, uint8_t* buf, int cap, int* lenOut);   /* 定义在后面 */
+static int g_cap;                      /* 1=正在跑我们自己触发的那次 Bp 调用 */
+static uint8_t g_reply[8192];
+static int g_reply_len;
+static AIBinder* g_stream;
+static int g_fds[8]; static int g_nfd;
+static int (*real_tx)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t);
+
+__attribute__((visibility("default")))
+int AIBinder_transact(AIBinder* binder, uint32_t code, AParcel** in, AParcel** out, uint32_t flags) {
+  if (!real_tx) real_tx = (int (*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))
+      dlsym(RTLD_NEXT, "AIBinder_transact");
+  int r = real_tx(binder, code, in, out, flags);
+  if (g_cap && code == 15 && r == 0 && out && *out) {
+    AParcel* op = *out;
+    g_reply_len = 0;
+    spill(op, g_reply, sizeof g_reply, &g_reply_len);
+    int (*rb)(const AParcel*, AIBinder**) =
+      (int (*)(const AParcel*, AIBinder**))dlsym(N.ndk, "AParcel_readStrongBinder");
+    int (*rfd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
+    int (*ri)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
+    int32_t ex = -1;
+    if (ri) ri(op, &ex);
+    if (rb) { AIBinder* st = NULL; if (rb(op, &st) == 0 && st) g_stream = st; }
+    (void)rfd;
+    printf("  [插桩] reply=%d 字节 ex=%d stream=%p\n", g_reply_len, ex, (void*)g_stream);
+    fflush(stdout);
+  }
+  return r;
+}
 
 static void noop_create(void* a) { (void)a; }
 static void noop_destroy(void* a) { (void)a; }
@@ -164,7 +200,14 @@ int main(int argc, char** argv) {
   CtorBp(bp, &b);
   static char ret[2048]; memset(ret, 0, sizeof ret);
   static char sret[32]; memset(sret, 0, sizeof sret);
+  if (getenv("CAP")) { g_cap = 1; }
   call_sret3(openOut, bp, args, ret, sret);
+  if (getenv("CAP")) {
+    g_cap = 0;
+    printf("CAP 完成: stream=%p reply=%d 字节\n", (void*)g_stream, g_reply_len); fflush(stdout);
+    printf("CAP reply hex "); for (int i = 0; i < g_reply_len && i < 120; i++) printf("%02x", g_reply[i]);
+    printf("\n"); fflush(stdout);
+  }
   void* so = *(void**)sret;
   int st = so ? ((int32_t(*)(const void*))dlsym(N.ndk, "AStatus_getStatus"))(so) : 0;
   printf("TRANSACT st=%d ret 前 8 个 int: ", st);
