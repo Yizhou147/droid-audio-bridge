@@ -655,6 +655,9 @@ int auto_build(void* h) {
       call_sret3(gapc, bp, vec, vec, vs);
       printf("  APC: getAudioPortConfigs 抄到 %d 字节 vec=[%p,%p]\n", g_cfg_len,
              *(void**)&vec[0], *(void**)&vec[8]); fflush(stdout);
+      printf("  APC 头 20 个 int32:");
+      for (int t = 0; t < 20 && t*4 < g_cfg_len; t++) printf(" %d", *(int*)(g_cfg + 4*t));
+      printf("\n"); fflush(stdout);
       int n = g_cfg_len > 8 ? *(int*)(g_cfg + 8) : 0;           /* [ex][arrSize][count] */
       int o = 12, found = -1;
       for (int k = 0; k < n && o + 12 <= g_cfg_len; k++) {
@@ -665,8 +668,20 @@ int auto_build(void* h) {
         if (port == want && found < 0) found = o;
         o += sz;
       }
-      if (found < 0) printf("  APC: 没找到 portId=%d 的现成 config\n", want);
-      else {
+      if (found < 0) {
+        /* 严格走表失败 ⇒ 值扫描兜底：找 [size][id][portId==want] 三元组，size 要合理 */
+        printf("  APC: 严格走表没找到（count=%d）⇒ 改值扫描\n", n); fflush(stdout);
+        for (int q = 0; q + 12 <= g_cfg_len; q += 4) {
+          int sz = *(int*)(g_cfg + q), id = *(int*)(g_cfg + q + 4), port = *(int*)(g_cfg + q + 8);
+          if (port == want && sz > 12 && sz < 2048 && id >= 0 && id < 4096) {
+            printf("  APC: 值扫描命中 @%d size=%d id=%d portId=%d\n", q, sz, id, port);
+            found = q; fflush(stdout); break;
+          }
+        }
+        if (found < 0) printf("  APC: 值扫描也没找到 portId=%d\n", want);
+      }
+      if (found >= 0) {
+      {
         int sz = *(int*)(g_cfg + found);
         static uint8_t elem[4096];
         memcpy(elem, g_cfg + found, (size_t)sz);
