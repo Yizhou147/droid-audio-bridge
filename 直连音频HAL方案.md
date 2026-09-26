@@ -1117,3 +1117,102 @@ HAL write_db 等的地址 0x73088ef018 → HAL 映射 73088ef000-73088f0000 rw-s
 看 `write_db` 的 CPU 是否开始涨、+8 写指针是否推进、槽里出现什么 ——
 若涨，则 `+24` 是"写区域末端"而不是事件字（那事件字在别处，需要重新定位），
 并且我们会第一次看到 HAL 主动往这条队列里写的内容 = 真正的命令语义。
+
+
+## 30. 【09-26 18:0x ★协议层收工：事务码表定死 + AudioPatch 的两种布局全测出来】
+
+§29.1 那个"往 +24 写大值"的实验不用做了 —— 后来发现 SESSION 一跑，
+数据就被真消费了（见 §31），根因是**输出方向用反了**（先投数据再 `burst(N)`，
+`N`=字节数），不是队列几何。
+
+### 30.1 事务码表（一次性钉死）
+
+`nm` 出 core-V2-ndk.so 与 core-V4-ndk.so 里 `BpModule` 的全部方法，按**地址序**排：
+两份**完全同序** ⇒ HAL 虽然只链 V2，但码号和我们用的 V4 客户端一致。
+再加已实测锚点（10=getAudioPortConfigs、11=getAudioPorts、15=openOutputStream、18=setAudioPortConfig）：
+
+```
+1 setModuleDebug   8 getAudioPatches    9 getAudioPort   15 openOutputStream
+17 setAudioPatch   18 setAudioPortConfig 19 resetAudioPatch  20 resetAudioPortConfig
+```
+⇒ §24~§29 里"14=setAudioPortConnectState"是**错的**（14=openInputStream；这台 HAL 的
+Module 符号表里根本没有 setAudioPortConnectState）。
+
+### 30.2 AudioPatch：wire 8 个字，C++ 对象 88 字节
+
+从活的 HAL 上 `TR=8`（getAudioPatches）抄到的 5 条真 patch，每条 =
+`[1][size=32][id][1][源configId][1][汇configId][0][0]`
+⇒ **源/汇是 portConfigId 的 int 数组**，不是整份 AudioPortConfig。
+铁证：core-V2-ndk.so 的 `AudioPatch::readFromParcel` 里调了两次 `AParcel_readInt32Array`。
+
+C++ 侧（平台 `getAudioPatches` 解析出来的 vector，stride 反推 = 88）：
+
+```
++0  id            +8  sources vector(begin/end/cap)   +32 sinks vector(begin/end/cap)
++56 optional<AudioRouteType>  +64 optional<AudioGainConfig>
+```
+`AudioPatch::writeToParcel` 把真对象再编码一次 ⇒ 字节与我手搓的**逐字相同**
+（`32 1 1 55 1 54 0 …`）⇒ 打包本身没问题。
+
+### 30.3 手搓 raw transact 在这条调用上必死，只能走平台
+
+四种组合（写/不写顶层 size × flags 0/0x10）全被拒：
+- 带 size：`st=-22`；免 size：`st=0x80000008`。
+- 结论：**别再用 raw `AIBinder_transact` 发 setAudioPatch**，
+  改成 `dlsym` 平台的 `BpModule::setAudioPatch` + `call_sret3`（argsloop 里的 `PP` 模式）。
+  注意 `BpModule` 符号名里 `INS3_`/`EPS5_` 这类编号是从 `nm` 抄来的，手打必错（本轮就白跑一次 CI）。
+
+## 31. 【09-26 18:3x ★★★A 路打通：PAL 真开成流、扬声器接上、数据连续消费】
+
+### 31.1 一次 run 里凑齐三件套（`bin/connect.sh`，全程零载荷＝静音）
+
+1. `LOAD=/data/local/tmp/mix2.bin` ⇒ 平台 `AudioPortConfig::readFromParcel` 解出真对象、清 id、
+   `setAudioPortConfig` ⇒ 我们自己的 `deep_buffer_out` config（实测 id=53）。
+2. `LOAD2=/data/local/tmp/dev23.bin DEVPORT=23` ⇒ 同一招建**扬声器设备端口** config（id=54）。
+   HAL 明文回显确认字段全对：
+   `created new port config for speaker AudioPortConfig{id: 54, portId: 23, …
+   ext: AudioPortExt{device: AudioDevice{type: OUT_SPEAKER, address: }}`
+3. `PP=1 LOADP=patch0.bin PAUTO=1 SENDP=1 POKE=0:0` ⇒ 用平台 `setAudioPatch` 发 patch，
+   `PAUTO` 按 +8/+32 把源/汇填成上面两个 id。判决：
+   `setAudioPatch: created [deep_buffer_out -> speaker] AudioPatch{id: 1, sourcePortConfigIds: [53], sinkPortConfigIds: [54], minimumStreamBufferSizeFrames: 1920, latenciesMs: [10]}`
+
+### 31.2 ★唯一的坑：`AudioPatch.id` 必须填 **0** 才是"新建"
+
+- `id=0` ⇒ `created`（HAL 自己分配 id，实测分到 1）。
+- `id=-1` ⇒ `setAudioPatch: not found existing patch id -1` + `ex=-3`。
+- `id=1`（框架那条，接管轮里已随 audioserver 死掉）⇒ 同样 `not found`。
+  ⇒ 之前"框架的 patch 会活过 audioserver 死亡"的假设**不成立**，接管轮里一切从零建。
+
+### 31.3 接通之后的 HAL 判决（对照 §26~§28 的"永远不 start"）
+
+```
+AHAL_StreamOut_QTI: configure : assigned pal stream type:2
+AHAL_StreamOut_QTI: configure : set pal_stream_set_buffer_size to 15360 with count 2
+AHAL_StreamOut_QTI: configure : stream is configured
+AHAL_StreamOut_QTI: configure : completed in 116.872 ms [pal_stream_open: 53.9 ms  pal_stream_start: 62.8 ms]
+```
+"no connected devices on stream!!" 消失。SESSION 8 轮全绿：
+`消费=1920 state=3(ACTIVE) lat=129`，data 读指针一路追到 15360（＝写指针）。
+
+### 31.4 还没解释清的两条（都不挡放音，但要记着）
+
+- `Reply.observable.frames` 恒 0、`hardware.frames` 恒 -1(UNKNOWN)，可 `latencyMs=129` 是真算出来的。
+  Reply 元素 56 字节、起点 = 映射 +16（`[+0 status][+4 fmqByteCount][+8 observable.frames]
+  [+16 observable.timeNs][+24 hardware.frames][+32 hardware.timeNs][+40 latencyMs][+44 xrun][+48 state][+52 reserved]`），
+  偏移已按实测值对齐，别再猜。
+- `THR` 里 `write_db cpu=0` 与"configure 就跑在该线程上"矛盾 ⇒ 我读 `/proc/<tid>/stat` 的字段号是错的，
+  这条判据作废（之前用它当"没被叫醒"的证据时要小心）。
+
+### 31.5 现场
+
+- 实验全在**接管轮条件**（`ctl.stop audioserver`）下跑，脚本结尾会 `ctl.start` 恢复；
+  恢复后 `TR=10/TR=8` 复查：10 条 config、6 条 patch，id/端口与实验前**完全一致** ⇒ 没留尾巴。
+- 三个模板文件（`mix2.bin` 120B / `dev23.bin` 152B / `patch0.bin` 32B）是从活的 HAL 上 SAVE 下来的，
+  丢了就得回 anland 重抄一遍（接管轮里 `getAudioPortConfigs` 是空的）。
+
+## 32. 下一步（M3：把容器的真 PCM 接进来）
+
+1. 数据通道已经够用（dataMQ 16KB、burst 语义已验证）⇒ 把 SESSION 里的 `memset 0` 换成
+   从容器读来的 PCM：容器 PipeWire monitor → `aa-feeder.sh` → TCP → argsloop 的 sink 分支。
+2. `hardware.frames=-1` 对放音不影响，但**时钟/延迟**要自己算：容器侧按 48000×2×4 的字节率投喂即可。
+3. 出声验证要用户点头（静音纪律）；能出声时第一件事是**低声单频短促测试**，不是放整首曲子。
