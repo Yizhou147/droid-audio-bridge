@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
 
   if (getenv("GP")) {   /* 自检：调平台 BpModule::getAudioPorts——它必然在 HAL 侧打日志并填 vector */
     int (*gaps)(void*, void*) = (int(*)(void*,void*))dlsym(h,
-      "_ZN4aidl7android8hardware5audio4core8BpModule13getAudioPortsEPNSt3__16vectorINS0_5media5audio6common9AudioPortENS5_9allocatorIS7_EEEE");
+      "_ZN4aidl7android8hardware5audio4core8BpModule13getAudioPortsEPNSt3__16vectorINS0_5media5audio6common9AudioPortENS5_9allocatorISA_EEEE");
     if (!gaps) { fprintf(stderr, "没有 getAudioPorts 符号\n"); return 7; }
     static char vec[32]; memset(vec, 0, sizeof vec);
     static char sr2[32];
