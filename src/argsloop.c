@@ -977,6 +977,24 @@ int auto_build(void* h) {
     }
   }
 
+  /* DUMPQ=1：把每块队列映射里**所有非零字**打出来（最多 48 个/块）。
+   * 为什么需要：writeBlocking 的等待方是生产者 ⇒ 它用的写/读指针不一定在我以为的 +0/+8，
+   * 先把"哪些字节非零"看清楚，再谈往哪写。 */
+  if (getenv("DUMPQ") && g_nq) {
+    for (int i = 0; i < g_nq; i++) {
+      uint8_t* b = (uint8_t*)g_qmem[i];
+      size_t lim = g_qsz[i] < 65536 ? g_qsz[i] : 65536;
+      int shown = 0;
+      printf("  DUMPQ q%d(fd %d, 映射 %zu) 非零字：", i, g_qfd[i], g_qsz[i]);
+      for (size_t t = 0; t + 4 <= lim && shown < 48; t += 4) {
+        uint32_t v = *(uint32_t*)(b + t);
+        if (v) { printf(" @%zu=0x%x", t, v); shown++; }
+      }
+      printf("  （共显示 %d 个）\n", shown);
+    }
+    fflush(stdout);
+  }
+
   if (getenv("WATCH") && getenv("GOT") && g_nq) {
     int ms = atoi(getenv("WATCH"));
     static uint8_t snap[4][256];
