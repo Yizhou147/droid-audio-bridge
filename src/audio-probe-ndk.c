@@ -212,6 +212,36 @@ int main(int argc, char** argv) {
           fflush(stdout);
         }
       }
+      if (getenv("ARGS6")) {
+        /* 一次矩阵扫清 Arguments 形状（不再逐次猜）。size 由程序算＝4+4*n，保证自洽。
+         * 词表：1=presence/1=head；SM 用 [size,head,len]；i64 用两个 0；cb/evcb 各一个 0。 */
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        static const int32_t P1[] = {1, 12,1,0, 0, 0,0, 0,0};   /* pres,SM,pres,i64,cb,evcb */
+        static const int32_t P2[] = {1, 8,0,   0, 0,0, 0,0};    /* SM=[size][head=0] */
+        static const int32_t P3[] = {   12,1,0, 0, 0,0, 0,0};   /* SM 非空指针：无 presence */
+        static const int32_t P4[] = {1, 12,1,0, 0, 0,0};         /* 无两个 binder 尾 */
+        static const int32_t P5[] = {0, 1, 12,1,0, 0, 0,0, 0,0};/* 先 version */
+        static const int32_t P6[] = {1, 16,1,0,0, 0, 0,0, 0,0};  /* SM size=16 */
+        static const int32_t P7[] = {1, 12,1,1, 0, 0,0, 0,0};    /* 数组 len=1 */
+        const int32_t* ps[7] = {P1,P2,P3,P4,P5,P6,P7};
+        unsigned ns[7] = {9,8,8,7,10,10,9};
+        const char* nm[7] = {"P1 pres+SM12", "P2 SM head0", "P3 无SM-pres", "P4 无binder",
+                             "P5 先version", "P6 SM size16", "P7 数组len1"};
+        for (int v = 0; v < 7; v++) {
+          AParcel* in8 = NULL; AParcel* out8 = NULL;
+          if (N.Prepare(b, &in8) != 0) break;
+          wI32(in8, 0);                         /* 异常头 EX_NONE */
+          wI32(in8, 4 + 4 * (int)ns[v]);        /* args size：自身 + 后续字 */
+          for (unsigned k = 0; k < ns[v]; k++) wI32(in8, ps[v][k]);
+          int s8 = N.Transact(b, 15, &in8, &out8, 0);
+          int32_t e8 = -1, h8 = -1;
+          if (out8) { N.Parcel_readInt32(out8, &e8); N.Parcel_readInt32(out8, &h8); }
+          printf("ARGS6 %-14s st=%d ex=%d first=%#x reply=%zu %s\n", nm[v], s8, e8, (unsigned)h8,
+                 (out8 && N.Parcel_dataSize) ? N.Parcel_dataSize(out8) : 0,
+                 (s8 == 0) ? "★★事务通！" : "");
+          fflush(stdout);
+        }
+      }
       if (getenv("ARGS5")) {
         /* 09-26 定案模型：请求 = [异常头=0][args: size][pres][SourceMetadata][pres][i64][cb][evcb]
          * 之前多写的一个 int 被当成 SourceMetadata 的 presence=0 ⇒ 正好回读端那条 0x80000008；
