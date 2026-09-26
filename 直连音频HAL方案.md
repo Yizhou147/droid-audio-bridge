@@ -1238,3 +1238,25 @@ rpy  映射 4096，元素 56 字节（容量=56 ⇒ 只有 1 个槽！）
   （单位是不是"帧"还没证伪：改成帧的 `BURSTFR=1` 旋钮留着）。
 - `Reply.observable.frames` 恒 0 / `hardware.frames` 恒 -1，但 `latencyMs=129` 是真算出来的；
   也就是说**位置上报不可用**，容器侧的时钟/延迟得自己按字节率算（M3 要记着）。
+
+
+## 32. 【09-26 18:59 ★★★★M2 收官：扬声器真的出声了（A 路端到端成立）】
+
+`PIDF=0 TONE=440 AMP=3.2e8 ROUNDS=60 sh connect.sh`
+⇒ 22 轮全 `消费=8192 state=ACTIVE`，`configure: stream is configured`，
+**用户在平板旁听到 440Hz 单音**（"听到了" / 第二次抬到满幅 15% 明确确认）。
+
+这条链现在完整成立，全程不依赖 audioserver：
+```
+本进程 → setAudioPortConfig×2(mix deep_buffer / device speaker) → setAudioPatch(id=0 新建)
+       → openOutputStream → CommandMQ(start,burst) + dataMQ(PCM) → HAL StreamOutPrimary::configure
+       → pal_stream_open/start(OUT_SPEAKER) → AGM → 扬声器
+```
+关键三坑（都在前面）：① 接管轮框架 portConfig 全空 ⇒ 自己 SAVE/LOAD 克隆；
+② setAudioPatch 只有 `id=0` 才新建，且 raw transact 发不动 ⇒ 走平台 BpModule；
+③ 回包队列单槽 ⇒ 必须 availableToRead + 一问一答。
+
+### 32.1 M3（下一步）：测试单音 → 容器真 PCM
+- 现状：`argsloop` 是探针工具，不是常驻守护；出声用的是进程内 `sin()`。
+- 目标：容器 PipeWire monitor → TCP 回环 → 一个常驻 sink 进程，把 PCM 连续喂进上面这条已跑通的链。
+- 待定：位置上报不可用（obs=0/hw=-1）⇒ 容器侧时钟/节流按字节率（48000×8 B/s）自算。
