@@ -53,6 +53,10 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/hp-open.c -o out/hp-open
 
+# 以平台 readFromParcel 为裁判的参数迭代器（一次构建、设备上反复喂 IN，不用 CI）
+"$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
+    src/argsloop.c -o out/argsloop
+
 # 轮内 activity 服务桩（让 audioserver 走完 onFirstRef 的 waitForService("activity")）
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/activity-stub.c -o out/activity-stub
