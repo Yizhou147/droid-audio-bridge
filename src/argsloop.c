@@ -749,9 +749,16 @@ int auto_build(void* h) {
           int sv = -1, svsz = 0;
           for (int q = 0; q + 12 <= g_cfg_len; q += 4) {
             int sz = *(int*)(g_cfg + q), id = *(int*)(g_cfg + q + 4), port = *(int*)(g_cfg + q + 8);
-            int sr = (q + 20 <= g_cfg_len) ? *(int*)(g_cfg + q + 16) : 0;
-            if (port == want && sz > 16 && sz < 4096 && id >= 0 && id < 4096 &&
-                (sr == 48000 || sr == 44100 || sr == 0)) { sv = q; svsz = sz; break; }
+            /* 采样率在元素头部的哪一格取决于 optional 布局 ⇒ 不猜位置，只要头部 44 字节里
+               出现过合法采样率就认定这是"完整 config"元素（上一版按固定偏移读，误命中 20 字节的碎片） */
+            int srk = 0;
+            for (int z = 8; z + 4 <= 48 && q + z + 4 <= g_cfg_len; z += 4) {
+              int v = *(int*)(g_cfg + q + z);
+              if (v == 48000 || v == 44100 || v == 96000 || v == 192000 || v == 16000 || v == 8000) srk = 1;
+            }
+            if (port == want && sz >= 60 && sz <= 4096 && id >= 1 && id <= 4096 && srk) {
+              sv = q; svsz = sz; break;
+            }
           }
           if (sv < 0) printf("  SAVE: 回包里没有 portId=%d 的 config\n", want);
           else {
