@@ -977,6 +977,22 @@ int auto_build(void* h) {
       usleep(50000);
       rounds++;
     }
+    { char ln[512];
+      for (int i = 0; i < g_nq; i++) {
+        FILE* mf = fopen("/proc/self/maps", "r");
+        if (!mf) break;
+        while (fgets(ln, sizeof ln, mf)) {
+          unsigned long a = 0, b = 0;
+          if (sscanf(ln, "%lx-%lx", &a, &b) == 2 && (unsigned long)g_qmem[i] == a) {
+            ln[strcspn(ln, "\n")] = 0;
+            printf("  我方 q%d(fd %d) 映射: %s\n", i, g_qfd[i], ln);
+            break;
+          }
+        }
+        fclose(mf);
+      }
+      fflush(stdout);
+    }
     printf("  WATCH: %d 轮比对，共 %d 次变化\n", rounds, changed); fflush(stdout);
     dump_write_threads("WATCH末");
   }
@@ -1014,6 +1030,25 @@ int auto_build(void* h) {
           if (sf) { if (fgets(line, sizeof line, sf)) {} fclose(sf); }
           line[strcspn(line, "\n")] = 0;
           printf("  TIDS: %s tid=%s %s\n", comm, te->d_name, line);
+          { /* 把这个 futex 地址落在 HAL 的哪条映射上打出来（带 inode），
+             * 用来判定"它等的到底是不是我们手里这几块队列" */
+            unsigned long ua = 0;
+            sscanf(line, "%*d %lx", &ua);
+            char mp[160]; snprintf(mp, sizeof mp, "/proc/%s/maps", de->d_name);
+            FILE* mf = fopen(mp, "r");
+            if (mf) {
+              char ln[512];
+              while (fgets(ln, sizeof ln, mf)) {
+                unsigned long a = 0, b = 0;
+                if (sscanf(ln, "%lx-%lx", &a, &b) == 2 && a <= ua && ua < b) {
+                  ln[strcspn(ln, "\n")] = 0;
+                  printf("    ↑ HAL 映射: %s\n", ln);
+                  break;
+                }
+              }
+              fclose(mf);
+            }
+          }
         }
         closedir(td);
         break;
