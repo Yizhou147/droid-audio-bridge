@@ -346,3 +346,25 @@ int32，本量级无损；去掉用后读）。
      换成按需逐个停（至少保 `surfaceflinger`+`zygote` 死、其余音频相关留着）——改动面大、需实测；
   B) **回到直连 HAL**（§10.1 已存档权威布局，只差 `flags=0x10000000` 这一层没试）——
      轮里 vendor HAL 本来就活着，不依赖任何 system_server 服务。
+
+## 13. 【09-26 上午·静音】openOutputStream 试探的真实进展：三颗错码各归其位，但形状仍差一处
+
+全部在 `IModule/r_submix` 上、零载荷无 fd、纯只读/静音；判据＝事务码 + HAL 是否打出实现日志/线程数。
+
+| 试验（r_submix） | 载荷 | 结果 |
+|---|---|---|
+| code 11 `getAudioPorts`（0 入参） | `[0]` | st=0，回包 ex=0、**下一 int=4**、816B ⇒ 回包的 args-size 只含自身 ⇒ size 只覆盖 in-args |
+| code 9 `getAudioPort(int)` | `[0][id]` | **st=0、16B 回复、ex=-3**；HAL 打 `getAudioPort: port id 0 not found` |
+| code 9 同上 | `[0][8][id]` | 同上（多余 int 被忽略）⇒ **单 int 方法：第一个 int 就是参数，没有 size 信封、没有异常头** |
+| code 15 ARGS2 | `[0][44][0][1][12][1][0][0][i64][0][0]` | `st=0x80000008` |
+| code 15 ARGS4（删异常头） | `[44][0][1][12]…` | `st=-22` |
+| code 15 ARGS5（删掉被当成 presence 的那个 int） | `[0][44][1][12][1][0][0][i64][0][0]` | **仍是 `0x80000008`** ⇒ "presence 错位"模型**证伪** |
+| 任意方法 + `flags=0x10`(ACCEPT_FDS) | — | 一律 `-22` 且无回包 ⇒ **fd 假设撤回**（NDK 这条路不吃这个 flag） |
+| HAL 是否被调到 | code 15 各形状 | `audiohalservice.qti` 线程 27→27、日志零条 ⇒ 全部死在**服务端 unmarshal**，实现没进去 |
+
+已排除：字段数不对（-22 与 0x80000008 的切换证明异常头/参数起点判定是对的）、fd、`0x10000000` 这个 flags（11/18/15 全都传它，而 11 通）。
+仍未定：`Arguments` 里 **SourceMetadata 的 `head/len` 口径**、i64 之前是否还有字段、以及"可继承 parcelable"的 `[size][version]` 顺序。
+
+⇒ **纪律**：不再靠猜形状试错（每轮一次 CI 太贵）。下一步只有两条正路：
+A) 拿**地面真值**——dlopen 平台自带 AIDL 客户端（`libaudiohal`/`AudioHalAidl`）在桥进程里直调，让平台自己打包（成了就连手搓都不用）；
+B) 回到"让 audioserver（及 system_server 侧依赖）不被 stop"的路，AAudio 直接复用平台栈（anland 态已真出声，只差轮内服务保活）。
