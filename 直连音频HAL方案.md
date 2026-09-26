@@ -868,3 +868,66 @@ low_latency(1) raw(2) haptics(3) **deep_buffer(4)** …；**HAL 的 portId ≠ X
   我这轮直开的流都在进程退出时随 binder 死亡自动关闭（日志有 `~StreamOutPrimary`）。
 - 后台 `aa-bridge` 已清理（`pkill -x`），没有遗留 AAudio 流。
 - 本轮全部实验都是**零采样**，没有外放过任何声音。
+
+## 25. 【09-26 16:2x ★A 路入口打通到"差最后一步"】私有 portConfig 能创建了，但接管轮里没有模板可抄
+
+参考来源（本轮决定性）：上游 VTS 的 `VtsHalAudioCoreModuleTargetTest.cpp` 就是一份完整的
+AIDL `IStreamOut` 客户端实现，配合 `StreamDescriptor.aidl / MQDescriptor.aidl / GrantorDescriptor.aidl`
+把 §22.8 的"HAL 不轮询"翻案了 —— 那三次实验全打在错误偏移上。
+
+### 25.1 FMQ 三队列身份确认（宽度逐个对上 AIDL 定义）
+
+| 队列 | grantor 解出的 (offset,宽度) | 事件字 | AIDL 类型 | 宽度校验 |
+|---|---|---|---|---|
+| q0 fd 9 | (+16, 8) | +24 | `Command` @FixedSize union | 8 = tag+payload ✓ |
+| q1 fd 10 | (+16, 56) | +72 | `Reply` @FixedSize | status+bytes+2×Position+2×int+state = 52→56 ✓ |
+| q2 fd 11 | (+16, 16384) | 尾部 | `byte` 元素 dataMQ | 2048 帧 × 8 字节 ✓ |
+
+⇒ 元数据 = `[u64 计数器A @0][u64 计数器B @8][元素区 @16][u32 eventFlag]`。
+`Command` 的 tag 序：`halReservedExit=0 getStatus=1 start=2 burst=3 drain=4 standby=5 pause=6 flush=7`。
+**流的起始状态是 STANDBY，必须往 CommandMQ 写 `Command{start}` 才会有 `AHAL_StreamOut_QTI: start`** —— §23.2 那个"没人消费"的真正原因。
+
+### 25.2 私有 portConfig 创建成功（模板克隆法）
+
+`IModule` 码表按 Bp 方法地址序数出，且被两个已知值双重验证（getAudioPorts=11、openOutputStream=15）；
+本轮 **getAudioPortConfigs=10、setAudioPortConfig=18 一次成功**，签名从符号表读出是
+`setAudioPortConfig(const AudioPortConfig&, AudioPortConfig* 出参, bool* 出参)`（`Pb`，不是 `b`）。
+
+做法：先码 10 让平台解析出真 config 的 `std::vector`（stride 必须**全元素校验**反推 ——
+第一版用"最后一个元素 portId 命中"会挑到半错位 136 而发出 `(null)` 字段），
+取 `portId==2` 那份、**只把 id 清 0**、交回码 18：
+
+```
+AHAL_Module_QTI: setAudioPortConfig: created new port config for deep_buffer_out
+                 AudioPortConfig{id: 99, portId: 2, sampleRate: Int{value: 48000}, ...}
+```
+
+### 25.3 但两条硬约束挡在接管轮路上
+
+1. **每个 mix 端口只允许 1 条流**：`findPortIdForNewStream: port id 2 has already reached maximum
+   allowed opened stream count: 1`（low_latency_out 也一样：运行时 maxOpenStreamCount=1，
+   跟 XML 里 `maxOpenCount="2"` 不一致 —— 以 HAL 回包为准）。
+   ⇒ anland 里端口被框架的 io 21 常驻占着；**接管轮里 audioserver 被 stop ⇒ 端口反而空出来**，
+   所以 A 路天生比 anland 顺。
+2. **audioserver 一停，portConfig 全没了**：`getAudioPortConfigs: returning 0 port configs`
+   （config 随客户端 binder 死；端口 `getAudioPorts: 52` 还在）。
+   ⇒ 接管轮里**没有模板可克隆**。手填那条路已推进到只差 `flags`/`ext`
+   （HAL 逐项回显，已确认 `+8=48000 +16=layoutMask3 +24=format.type` 等偏移；
+   还缺 `flags.output=8` 与 `ext=mix{...}`，`fully specified? 0` 就是它俩）。
+
+### 25.4 下一步（干净解法：把模板存盘 + 平台自己反序列化）
+
+不再猜 C++ 偏移 —— 在 audioserver **还活着**的时候，从码 10 的回包里切出 `portId==2` 那份 config 的
+**wire 字节**（实测在 @292、长 120）存成文件；接管轮里把字节写回 AParcel，调平台导出的
+`AudioPortConfig::readFromParcel` ⇒ 得到**字段齐全、optional 已 engage、string 已构造**的 C++ 对象；
+然后 id 清 0 → 码 18 → 拿到我们自己的 id → 码 15 开流 → CommandMQ 写 `start` → Reply 校验 → DataMQ 喂零帧。
+（这一步之后 A 路的音频数据完全绕开 audioserver，正是 §38 C-2 想要的"接管轮内直驱"。）
+
+### 25.5 本轮踩的坑（都进红线清单）
+
+- dash 里 `${X:+X=1}` / `${W:+W="$W"}` 展开出的词不是合法 `NAME=VALUE` ⇒ **整条命令静默不执行**（`env` 不报错），
+  现象是"日志一切正常就是新代码没跑"。改成普通赋值 `NOPRE="$NOPRE"` + C 侧 `atoi` 判值。
+- `grep -a` 的中文模式经 adb→sh→grep 多层传递会让**整条 alternation 失效**（今天两次）。验证输出只用 ASCII。
+- `auto_build` 里的 `args` 是**平台解出来的 C++ Arguments 结构**，不是 AParcel ——
+  拿它当 AParcel 用直接 SIGSEGV@0x58。改 portConfigId 就一句 `*(int32_t*)args = nid;`。
+- 设备上的 `why.log` 改名成 `why.args.log` 后别再拿旧名找；`grep 'RO +'` 里 `+` 要引号包住整条 pattern。
