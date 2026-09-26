@@ -474,7 +474,33 @@ int auto_build(void* h) {
   CtorBp(bp, &b);
   static char ret[4096]; memset(ret, 0, sizeof ret);
   static char sret[32];
+  if (getenv("GOT")) {
+    g_orig_tx = (void*)dlsym(N.ndk, "AIBinder_transact");
+    printf("GOT 安装：real=%p\n", g_orig_tx); fflush(stdout);
+    install_got_hook("android.hardware.audio.core-V4-ndk.so", g_orig_tx);
+    g_gotcap = 1;
+  }
   call_sret3(openOut, bp, args, ret, sret);
+  if (getenv("GOT")) {
+    g_gotcap = 0;
+    printf("GOT 结果: stream=%p reply=%d\n", (void*)g_gstream, g_greply_len); fflush(stdout);
+    int (*rfd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
+    int (*Prep2)(AIBinder*, AParcel**) = (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
+    AParcel* cin = NULL; AParcel* cout = NULL;
+    if (g_gstream && Prep2 && !Prep2(g_gstream, &cin)) {
+      N.Parcel_writeInt32(cin, 0);
+      int s3 = ((int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))g_orig_tx)(g_gstream, 1, &cin, &cout, 0x10);
+      size_t sz3 = cout ? N.Parcel_dataSize(cout) : 0;
+      printf("GOT2 getStreamCommon st=%d reply=%zu\n", s3, sz3); fflush(stdout);
+      if (s3 == 0 && cout && rfd) {
+        for (int pos = 0; pos + 4 <= (int)sz3; pos += 4) {
+          int fd = -1;
+          N.Parcel_setPos(cout, pos);
+          if (rfd(cout, &fd) == 0 && fd >= 0 && fd < 4096) { printf("FMQ_FD@%d=%d\n", pos, fd); fflush(stdout); }
+        }
+      }
+    }
+  }
   void* so = *(void**)sret;
   int st = so ? ((int32_t(*)(const void*))dlsym(N.ndk, "AStatus_getStatus"))(so) : 0;
   printf("TRANSACT st=%d ret前6int=", st);
