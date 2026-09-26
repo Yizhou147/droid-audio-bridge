@@ -998,6 +998,35 @@ int auto_build(void* h) {
     }
   }
 
+  /* ===== ROT=<n>：IModule::updateScreenRotation（事务码 29）=====
+   * 接管轮里没人给 PAL 推 rotation。框架的正常链路是
+   *   AudioFlinger setGameParameters("rotation=90") → pal_set_param(PAL_PARAM_ID_DEVICE_ROTATION=10)
+   *   → ResourceManager::handleDeviceRotationChange("Device is Stereo/Quad Speaker")
+   *   → StreamPCM::setParameters → setTKV(tag 0xc00003b) + SetOrientationCal，
+   * 四扬声器的左右映射就在这一步下发。ROTONLY=1 ⇒ 只发调用不开流（纯静默验证）。 */
+  {
+    int rotv = getenv("ROT") ? atoi(getenv("ROT")) : -1;
+    if (rotv >= 0) {
+      void* usr = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule20"
+                    "updateScreenRotationENS3_7IModule14ScreenRotationE");
+      printf("  ROT: updateScreenRotation=%p\n", usr); fflush(stdout);
+      if (usr) {
+        static char rws[32]; memset(rws, 0, sizeof rws);
+        int orc = g_capcode; g_capcode = -1;
+        call_sret3(usr, bp, (void*)(intptr_t)rotv, NULL, rws);
+        g_capcode = orc;
+        void* sv = *(void**)rws;
+        int (*grst)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+        int (*grex)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getExceptionCode");
+        const char* (*grmsg)(const void*) = (const char*(*)(const void*))dlsym(N.ndk, "AStatus_getMessage");
+        printf("  ROT: updateScreenRotation(%d) st=%d ex=%d msg=\"%s\"\n", rotv,
+               sv && grst ? grst(sv) : -999, sv && grex ? grex(sv) : -999,
+               sv && grmsg && grmsg(sv) ? grmsg(sv) : ""); fflush(stdout);
+      }
+      if (flag("ROTONLY")) { printf("  ROT: ROTONLY ⇒ 不开流退出\n"); fflush(stdout); return 0; }
+    }
+  }
+
   /* ===== PP=1：AudioPatch 的"平台代打"实验 =====
    * 手搓 4 种打包全被拒（-22 = HAL 侧 Parcel::read 失败；免 size 那版 0x80000008），
    * 所以改成：① 用平台自己的 BpModule::getAudioPatches 读出 5 条真 patch 的 C++ 对象，
