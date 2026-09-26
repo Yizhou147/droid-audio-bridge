@@ -121,7 +121,27 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
     for (int pos = 0; rfdp && pos + 4 <= g_greply_len; pos += 4) {
       int fd = -1;
       N.Parcel_setPos(op, pos);
-      if (rfdp(op, &fd) == 0 && fd >= 0 && fd < 4096) printf("  [GOT] PFD@%d = %d\n", pos, fd);
+      if (rfdp(op, &fd) == 0 && fd >= 0 && fd < 4096) {
+        struct stat sb;
+        char path[64], link[256];
+        snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+        ssize_t nl = readlink(path, link, sizeof link - 1);
+        if (nl > 0) link[nl] = 0; else snprintf(link, sizeof link, "?");
+        int rc2 = fstat(fd, &sb);
+        printf("  [GOT] PFD@%d = %d -> %s size=%lld\n", pos, fd, link,
+               rc2 == 0 ? (long long)sb.st_size : -1LL);
+        if (rc2 == 0 && sb.st_size > 0) {          /* 是共享内存就打开来看头部 */
+          size_t sz = (size_t)sb.st_size;
+          if (sz > 1u << 20) sz = 1u << 20;
+          void* m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+          printf("  [GOT]   mmap(%zu)=%p\n", sz, m);
+          if (m != MAP_FAILED) {
+            const uint8_t* q = (const uint8_t*)m;
+            for (int t = 0; t < 64; t += 8)
+              printf("  [GOT]   +%d=0x%016llx\n", t, (unsigned long long)*(const uint64_t*)(q + t));
+          }
+        }
+      }
     }
     N.Parcel_setPos(op, 0);
     fflush(stdout);
