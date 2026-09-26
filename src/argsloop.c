@@ -52,9 +52,9 @@ int AIBinder_transact(AIBinder* binder, uint32_t code, AParcel** in, AParcel** o
     g_reply_len = 0;
     spill(op, g_reply, sizeof g_reply, &g_reply_len);
     int (*rb)(const AParcel*, AIBinder**) =
-      (int (*)(const AParcel*, AIBinder**))dlsym(N.ndk, "AParcel_readStrongBinder");
-    int (*rfd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
-    int (*ri)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
+      (int (*)(const AParcel*, AIBinder**))dlsym(RTLD_DEFAULT, "AParcel_readStrongBinder");
+    int (*rfd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(RTLD_DEFAULT, "AParcel_readParcelFileDescriptor");
+    int (*ri)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(RTLD_DEFAULT, "AParcel_readInt32");
     int32_t ex = -1;
     if (ri) ri(op, &ex);
     if (rb) { AIBinder* st = NULL; if (rb(op, &st) == 0 && st) g_stream = st; }
