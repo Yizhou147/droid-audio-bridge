@@ -193,6 +193,25 @@ int main(int argc, char** argv) {
           fflush(stdout);
         }
       }
+      if (getenv("CAL37")) {
+        /* 判别"参数是否内联（无 size 信封）"：getMmapPolicyInfos(AudioMMapPolicyType) 一个 int 入参、
+         * 返回 vector<parcelable>（复杂但无 fd）。内联⇒发 [0] 就该 ex=0 并带回包；
+         * 若必须先发 size⇒发 [0] 会被当 size 读（<4）而回 -22/异常。 */
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        const char* lbl[2] = { "内联:只发[int]", "信封:先[size=8]再[int]" };
+        for (int v = 0; v < 2; v++) {
+          AParcel* in5 = NULL; AParcel* out5 = NULL;
+          if (N.Prepare(b, &in5) != 0) break;
+          if (v) wI32(in5, 8);
+          wI32(in5, 0);                       /* AudioMMapPolicyType = OUTPUT */
+          int s5 = N.Transact(b, 37, &in5, &out5, 0x10);
+          int32_t e5 = -1, n5 = -1;
+          if (out5) { N.Parcel_readInt32(out5, &e5); N.Parcel_readInt32(out5, &n5); }
+          printf("CAL37 %s st=%d ex=%d 第二int=%d reply=%zu\n", lbl[v], s5, e5, n5,
+                 (out5 && N.Parcel_dataSize) ? N.Parcel_dataSize(out5) : 0);
+          fflush(stdout);
+        }
+      }
       if (getenv("ARGS3")) {
         /* 09-26 实锤：必须带 FLAG_ACCEPT_FDS，否则 openOutputStream 的回包（含 FMQ 的 fd）被驱动拒掉，
          * 看到的 0x80000008 是假象；带上 0x10 后变成 -22＝读端"size<4"分支 ⇒ 怀疑请求**没有异常头**，
