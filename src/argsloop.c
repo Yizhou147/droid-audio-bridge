@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -675,8 +677,36 @@ int auto_build(void* h) {
             int (*gSt)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
             printf("  MMAP: status=%d shared_ptr 指向=%p\n", sst && gSt ? gSt(sst) : -999,
                    *(void**)spbuf); fflush(stdout);
-            void* scb2 = find_binder_in(*(void**)spbuf, "BpStreamCommon");
-            if (scb2) {
+            void* scpObj = *(void**)spbuf;
+            void* scb2 = find_binder_in(scpObj, "BpStreamCommon");
+            (void)scb2;
+            /* 原始事务在这条句柄上 prepare 不下来的原因不追了：平台自己有
+             * BpStreamCommon::createMmapBuffer(MmapBufferDescriptor*)，照 getStreamCommon 的
+             * 办法调它 —— 全程由平台打包/解包，我只管看结果。 */
+            void* cm = dlsym(h, "_ZN4aidl7android8hardware5audio4core14BpStreamCommon16create"
+                             "MmapBufferEPNS3_20MmapBufferDescriptorE");
+            if (!cm) printf("  MMAP: 缺 BpStreamCommon::createMmapBuffer 符号\n");
+            else {
+              static char md[256]; memset(md, 0, sizeof md);
+              static char st4[64]; memset(st4, 0, sizeof st4);
+              printf("  MMAP: 调 createMmapBuffer，对象=%p\n", scpObj); fflush(stdout);
+              call_sret3(cm, scpObj, md, NULL, st4);
+              void* sst4 = *(void**)st4;
+              printf("  MMAP: createMmapBuffer status=%d\n", sst4 && gSt ? gSt(sst4) : -999);
+              for (int k = 0; k < 64; k += 8)
+                printf("  md+%d=%p (int32=%d)\n", k, *(void**)(md + k), *(int32_t*)(md + k));
+              fflush(stdout);
+              for (int k = 0; k + 4 <= (int)sizeof md; k += 4) {
+                int v; memcpy(&v, md + k, 4);
+                if (v <= 0 || v > 4096) continue;
+                struct stat sb;
+                if (fstat(v, &sb) == 0)
+                  printf("  MMAP_FD@%d = %d  size=%lld mode=%o\n", k, v,
+                         (long long)sb.st_size, sb.st_mode);
+              }
+              fflush(stdout);
+            }
+            if (0) {
               AParcel* i4 = NULL; AParcel* o4 = NULL;
               int (*rI2)(const AParcel*, int32_t*) =
                 (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
