@@ -1169,7 +1169,8 @@ int auto_build(void* h) {
    * 找不到就打 "no connected devices on stream!!" 并让 transfer 失败 ⇒ 数据被消费但永远到不了 PAL/扬声器。
    * 框架正常路径是 AudioPolicy 发 IModule.setAudioPatch（码 17）。
    * 回包实测格式（out/dump/d8.log，5 条真 patch）：每元素 = [1][size=32][id][1][源configId][1][汇configId][0][0]
-   * ⇒ 源/汇是**portConfigId 引用**，不是整份 AudioPortConfig。顶层参数前面照规矩跟一个 objectSize。 */
+   * ⇒ 源/汇是 **portConfigId 的 int 数组**，不是整份 AudioPortConfig
+   *   （铁证：core-V2-ndk.so 里 AudioPatch::readFromParcel 调了两次 AParcel_readInt32Array）。 */
   if (flag("PATCH")) {
     int ps = getenv("PSRC") ? atoi(getenv("PSRC")) : *(int32_t*)args;
     int pd = getenv("PSINK") ? atoi(getenv("PSINK")) : g_devid;
@@ -1184,22 +1185,34 @@ int auto_build(void* h) {
     printf("PATCH: code=%u id=%d src=%d sink=%d\n", pcode, pid, ps, pd); fflush(stdout);
     if (!PrepM || !TxM) printf("  PATCH: 缺 prepare/transact\n");
     else if (ps <= 0 || pd <= 0) printf("  PATCH: src/sink 没准备好（src=%d sink=%d）\n", ps, pd);
-    else if (PrepM(b, &pin)) printf("  PATCH: prepare 失败\n");
     else {
-      N.Parcel_writeInt32(pin, 32);          /* AudioPatch objectSize */
-      N.Parcel_writeInt32(pin, pid);
-      N.Parcel_writeInt32(pin, 1); N.Parcel_writeInt32(pin, ps);
-      N.Parcel_writeInt32(pin, 1); N.Parcel_writeInt32(pin, pd);
-      N.Parcel_writeInt32(pin, 0); N.Parcel_writeInt32(pin, 0);
-      int oldcap = g_capcode; g_capcode = -1;      /* 别把这次的回包抄进 g_cfg */
-      int rs = TxM(b, pcode, &pin, &pout, 0);
-      g_capcode = oldcap;
-      size_t psz = pout ? N.Parcel_dataSize(pout) : 0;
-      static uint8_t pb[512]; int pl = 0;
-      if (pout) { N.Parcel_setPos(pout, 0); spill(pout, pb, sizeof pb, &pl); }
-      printf("  PATCH: st=%d 回包 %zu 字节 %d:", rs, psz, pl);
-      for (int t = 0; t + 4 <= pl; t += 4) printf(" %d", *(int*)(pb + t));
-      printf("\n");
+      /* 四种打包组合逐个试（上一版只有"[size][字段] + flags0" ⇒ st=-22；
+       * 而 -22(BAD_VALUE) 在这条链路上就是"回包里被读出了对象、我没举手接"）。
+       *   bit0 = 不写顶层 objectSize；bit1 = 带 FLAG_ACCEPT_FDS(0x10)。
+       * 判据：st=0 且回包第一个 int32（异常码）=0。 */
+      int32_t wd[8] = { 32, pid, 1, ps, 1, pd, 0, 0 };
+      const char* order = getenv("PATCHVAR") ? getenv("PATCHVAR") : "0123";
+      int done = -1;
+      for (const char* vp = order; *vp && done < 0; vp++) {
+        int v = *vp - '0';
+        if (v < 0 || v > 3) continue;
+        pin = NULL; pout = NULL;
+        if (PrepM(b, &pin)) { printf("  PATCH v%d: prepare 失败\n", v); break; }
+        for (int q = (v & 1) ? 1 : 0; q < 8; q++) N.Parcel_writeInt32(pin, wd[q]);
+        uint32_t fl = (v & 2) ? 0x10 : 0;
+        int oldcap = g_capcode; g_capcode = -1;
+        int rs = TxM(b, pcode, &pin, &pout, fl);
+        g_capcode = oldcap;
+        size_t psz = pout ? N.Parcel_dataSize(pout) : 0;
+        static uint8_t pb[512]; int pl = 0;
+        if (pout) { N.Parcel_setPos(pout, 0); spill(pout, pb, sizeof pb, &pl); }
+        int32_t pex = (pl >= 4) ? *(int32_t*)pb : -999;
+        printf("  PATCH v%d(flags=%#x 免size=%d): st=%d 回包 %zu ex=%d:", v, fl, v & 1, rs, psz, pex);
+        for (int t = 4; t + 4 <= pl && t < 48; t += 4) printf(" %d", *(int*)(pb + t));
+        printf("\n"); fflush(stdout);
+        if (rs == 0 && pex == 0) done = v;
+      }
+      printf("  PATCH 结果=%s\n", done >= 0 ? "已送达" : "全部被拒"); fflush(stdout);
     }
     fflush(stdout);
   }
