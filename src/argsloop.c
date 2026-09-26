@@ -130,14 +130,19 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
         int rc2 = fstat(fd, &sb);
         printf("  [GOT] PFD@%d = %d -> %s size=%lld\n", pos, fd, link,
                rc2 == 0 ? (long long)sb.st_size : -1LL);
-        if (rc2 == 0 && sb.st_size > 0) {          /* 是共享内存就打开来看头部 */
-          size_t sz = (size_t)sb.st_size;
-          if (sz > 1u << 20) sz = 1u << 20;
-          void* m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-          printf("  [GOT]   mmap(%zu)=%p\n", sz, m);
+        { /* ashmem 的 st_size 恒为 0 ⇒ 只能倍增试探真实大小，再 dump 队列头部 */
+          size_t sz = 4096, good = 0;
+          void* m = MAP_FAILED;
+          while (sz <= (1u << 26)) {
+            void* t = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (t == MAP_FAILED) break;
+            if (m != MAP_FAILED) munmap(m, good);
+            m = t; good = sz; sz *= 2;
+          }
+          printf("  [GOT]   mmap 大小=%zu 地址=%p\n", good, m);
           if (m != MAP_FAILED) {
             const uint8_t* q = (const uint8_t*)m;
-            for (int t = 0; t < 64; t += 8)
+            for (int t = 0; t < 48; t += 8)
               printf("  [GOT]   +%d=0x%016llx\n", t, (unsigned long long)*(const uint64_t*)(q + t));
           }
         }
