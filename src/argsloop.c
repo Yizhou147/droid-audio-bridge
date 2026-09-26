@@ -717,6 +717,29 @@ int auto_build(void* h) {
   for (int off = 0; off < 128; off += 8) { void* w = *(void**)(ret + off);
     printf("%d=%p%s ", off, w, readable(w) ? "*" : ""); }
   printf("\n"); fflush(stdout);            /* 带 * 的是我进程里真能读的地址 */
+  /* DEEP=1：平台已经把整个 OpenOutputStreamReturn 解析好了 —— 结构里的指针指向的就是
+   * 它自己的 FMQ 对象。挨个 dump 指向的内存，字段值（含 fd、元素大小、计数偏移）
+   * 直接由平台的解析代码填好，比我逆协议可靠得多。vptr 的符号名还顺带告诉我类名。 */
+  if (getenv("DEEP")) {
+    for (int off = 0; off + 8 <= 256; off += 8) {
+      void* pv = *(void**)(ret + off);
+      if (!readable(pv)) continue;
+      Dl_info di = {0};
+      int hv = dladdr(*(void**)pv, &di);
+      printf("  RET+%d -> %p  vptr=%p<-%s:%s\n", off, pv, *(void**)pv,
+             hv && di.dli_fname ? strrchr(di.dli_fname, '/') + 1 : "-",
+             hv && di.dli_sname ? di.dli_sname : "?");
+      printf("      int32:");
+      for (int k = 0; k < 16; k++) {
+        int32_t v = *(int32_t*)((char*)pv + 4 * k);
+        printf(" %d:%d", 4 * k, v);
+      }
+      printf("\n      ptr :");
+      for (int k = 0; k < 8; k++) printf(" %d:%p", 8 * k, *(void**)((char*)pv + 8 * k));
+      printf("\n");
+    }
+    fflush(stdout);
+  }
   g_nrd = 0;
   for (int off = 0; off + 16 <= 128; off += 8) {   /* 只扫 Return 头部，别拿随机指针往别的 binder 对象发事务 */
     void* cand = *(void**)(ret + off);
