@@ -688,15 +688,16 @@ int auto_build(void* h) {
        * 清零的 libc++ std::string = 空串、shared_ptr = null ⇒ 合法对象。
        * 其余字段留给 HAL 按端口默认填，看它回显什么再决定要不要补。 */
       void* sac = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule18"
-                    "setAudioPortConfigERKNS0_5media5audio6common15AudioPortConfigEPS8_b");
+                    "setAudioPortConfigERKNS0_5media5audio6common15AudioPortConfigEPS8_Pb");
       if (sac) {
         static char cfg[512]; memset(cfg, 0, sizeof cfg);
         static char res[512]; memset(res, 0, sizeof res);
         static char st6[64]; memset(st6, 0, sizeof st6);
+        static char okflag[8]; memset(okflag, 0, sizeof okflag);   /* 第三参是 bool* */
         *(int32_t*)(cfg + 0) = 0;                      /* id = 0 ⇒ 新建 */
         *(int32_t*)(cfg + 4) = want;                   /* portId */
         g_capcode = 18; g_cfg_len = 0;
-        call_sret4(sac, bp, cfg, res, (void*)(uintptr_t)0, st6);
+        call_sret4(sac, bp, cfg, res, okflag, st6);
         void* sv = *(void**)st6;
         int (*gst6)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
         printf("  ACP2: setAudioPortConfig st=%d  回包抄到=%d 字节\n",
