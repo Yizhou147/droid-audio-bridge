@@ -806,6 +806,34 @@ int auto_build(void* h) {
         int (*rI)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
         if (rI) rI(out3, &e3);
         printf("  reply ex=%d\n", e3); fflush(stdout);
+        /* UM=1：验"updateMetadata ⇒ HAL 才 start"这条假设 —— 框架自己那条流的日志顺序是
+         * startSource → setAggregateSourceMetadataV7 → AHAL_StreamOut_QTI: start。
+         * 这里用平台的 BpStreamOut::updateMetadata 发一个**全零** SourceMetadata：
+         * 字段值先不管，只看 logcat 里会不会冒出 "start"。 */
+        if (getenv("UM")) {
+          void* um = dlsym(h, "_ZN4aidl7android8hardware5audio4core11BpStreamOut14"
+                             "updateMetadataERKNS2_6common14SourceMetadataE");
+          if (!um) printf("  UM: 缺 BpStreamOut::updateMetadata 符号\n");
+          else {
+            static char sm[512]; memset(sm, 0, sizeof sm);
+            static char ust[64]; memset(ust, 0, sizeof ust);
+            int (*gst2)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+            call_sret3(um, cand, sm, ust, ust);
+            void* us = *(void**)ust;
+            printf("  UM: updateMetadata status=%d\n", us && gst2 ? gst2(us) : -999);
+            if (getenv("UMI")) {
+              int32_t* w = (int32_t*)sm;
+              /* 逐个 int32 位置试不同值，找哪个字段被 HAL 读出来（看 logcat 的 metadata 行） */
+              for (int k = 0; k < 8; k++) {
+                memset(sm, 0, sizeof sm); w[k] = 1; memset(ust, 0, sizeof ust);
+                call_sret3(um, cand, sm, ust, ust);
+                printf("    UM 试 +%d=1\n", 4 * k);
+              }
+            }
+            fflush(stdout);
+            usleep(3000000);
+          }
+        }
         if (getenv("MMAP")) {
           /* IStreamCommon::createMmapBuffer = 码 8（从 BpStreamCommon 的 AIDL 声明序数出来）。
            * 拿它的 fd 就能 mmap 出一块和 HAL 共享的环形区 —— 不依赖 FMQ 协议就有数据通道。
