@@ -987,3 +987,59 @@ tid=9488 comm=write_raw  … cpu=0
    非 POD 元素用序列化槽，槽首 4 字节可能是消息长度 —— 这决定 HAL 能不能认出这是 `start`）；
 3. 判据不变：`write_db` 的 CPU 开始涨 + `AHAL_StreamOut_QTI: start` + Reply 队列出现 `state=ACTIVE`。
    到那一步再喂真正的 PCM（先零帧）。
+
+## 27. 【09-26 17:0x ★FMQ 布局拿到权威答案 + 一个"命令被消费"的硬证据】
+
+### 27.1 grantor 四字段的真实含义（`system/libfmq/include/fmq/MessageQueueBase.h` 原文）
+
+```cpp
+size_t memSize[] = {
+    sizeof(hardware::details::RingBufferPosition), /* read pointer counter  */
+    sizeof(hardware::details::RingBufferPosition), /* write pointer counter */
+    kQueueSizeBytes,                               /* data buffer           */
+    sizeof(std::atomic<uint32_t>)                  /* EventFlag word        */
+};
+```
+对照我们的回包：q0 = (0,8)(8,8)(16,8)(24,4)、q1 = (0,8)(8,8)(16,56)(72,4)、q2 = (0,8)(8,8)(16,16384)…
+⇒ **每块队列 = [消费者位置结构 @0][生产者位置结构 @8][元素区 @16][EventFlag 字 @16+元素区]**，
+`RingBufferPosition` 是 8 字节 = `{written, read}` 一对 u32（所以生产者结构里的 `written` 在 **+8**、`read` 在 +12；
+消费者结构里的 `written` 在 +0、`read` 在 +4）。
+
+### 27.2 HAL 的工作线程在等哪个 futex —— 从 `/proc/<tid>/syscall` 直接读出来
+
+```
+tid=25919 comm=write_db syscall: 98 0x7138c6c018 0x9 0x0 0x0 0x0 0x2 ...
+                          __NR_futex  uaddr      op=9=WAIT_BITSET(共享) val=0 bitset=0x2
+```
+⇒ 两条必须同时满足才能叫醒它：**(a) 把事件字里的 bit `0x2`（WRITE_NOTIFIED）置上；
+(b) 用共享的 `FUTEX_WAKE`（op=1）而不是 `FUTEX_WAKE_PRIVATE`** —— PRIVATE 与共享 futex 是两把不同的 key，
+之前几轮"WAKE 了但没人动"就是这个。另外等待者进 `wait` 前会自己清掉 bit，所以"事件字变回 0"**不能**当消费证据。
+
+### 27.3 有了一条真消费证据
+
+`CW=12`（把生产者结构的 `read` 域写 1）那一轮，之后 q0 头部变成 `+4:1 +12:1`、
+而我们写在 +16 的 tag=2 **被清成 0** —— `+4` 是**消费者结构的 `read` 字段**，不是我们写的
+⇒ HAL 确实取走了那个元素。（但 Reply 队列 `q1@+16..+72` 仍然全 0，`write_db` CPU 一直 0，
+HAL 也没打 `start` ⇒ 它消费了元素却没按我们的预期回应/启动。）
+
+数据侧同样试过（`CNT=8 BW=640` 写 dataMQ 生产者 `written=640` + 对 +16400 的事件字置 bit2 +
+全区 5120 个字发共享 WAKE）⇒ 消费者 `+4` 不动、无 PAL 活动。
+
+### 27.4 还差的那一点，以及两条取答案的路
+
+现在唯一不确定的是**生产者到底该怎么"发布"**（元素区是否要在 `written` 之前先 memcpy 到写侧槽位、
+SyncWriteRead 是否需要写两次 `written`/`read`、以及 `start` 命令在 QTI/Mi 派生类里是否要求
+`Reply` 之前先做别的）。便宜的定法有两种：
+
+- **A：反汇编设备上的客户端实现**。`libaudiohal_aidl.so`（已 pull 到 `pulled/`）里内联编译着
+  `AidlMessageQueue<StreamDescriptor::Command,…>::write/writeBlocking/reread`；
+  把它发布元素时**实际写了哪几个字节**读出来即可（一次读懂，后面全是照抄）。
+- **B：读一份"活的"框架队列**。用 `perf`/`strace` 之类需要 ptrace 的手段在本机被 SELinux 挡了
+  （`/proc/<pid>/mem` 读返回 0 字节），但 `/proc/<pid>/syscall` 能读 —— 继续用它，
+  配合"我们这边改一个字节、看它的 futex 参数怎么变"做差分。
+
+### 27.5 现场
+
+`audioserver` 已恢复 running；argsloop 退出时它开的流随 binder 死亡自动关闭；全程零采样。
+新增设备侧脚本：`bin/fmq.sh`（开流+发命令）、`bin/open.sh`（LOAD 模板 + start）、
+`bin/data.sh`（数据侧）、`bin/probe-thread.sh`（线程 CPU 裁判）、`bin/futex-addr.sh`（读 futex 参数）。
