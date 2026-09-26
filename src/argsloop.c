@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,33 +110,41 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
   }
   return r;
 }
-static int install_got_hook(const char* modpath, void* real) {
+static int install_got_hook(const char* modname, void* real) {
+  /* 槽地址 = 模块载入基址 + .rela.plt 给的静态偏移（AIBinder_transact = 0x5b400，
+   * 由 pull 下来的 core-V4-ndk.so 反解 PLT 得到；调用点 openOutputStream+0xdc → bl plt(0x55ed8)）。 */
+  unsigned long slotoff = strtoul(getenv("GOTOFF") ? getenv("GOTOFF") : "5b400", NULL, 16);
   FILE* f = fopen("/proc/self/maps", "r");
   if (!f) return -1;
   char line[512];
-  int n = 0;
-  unsigned long cnt[64];
-  unsigned long szs[64];
+  unsigned long bias = ~0UL;
+  int segs = 0;
   while (fgets(line, sizeof line, f)) {
     unsigned long a, b2; char perm[8];
     if (sscanf(line, "%lx-%lx %4s", &a, &b2, perm) != 3) continue;
-    if (!strstr(line, modpath)) continue;
-    if (!(perm[0] == 'r')) continue;
-    n = 0;
-    for (unsigned long o = a; o + 8 <= b2 && n < 64; o += 8) {
-      void* v = *(void**)o;
-      if (v == real) cnt[n] = o, szs[n] = b2 - a, n++;
-    }
-    if (n) {
-      for (int i = 0; i < n; i++) {
-        unsigned long pg = cnt[i] & ~0xfffUL;
-        if (mprotect((void*)pg, 0x2000, PROT_READ | PROT_WRITE) != 0) { printf("  [GOT] mprotect 失败@%lx\n", cnt[i]); continue; }
-        *(void**)cnt[i] = (void*)my_tx;
-        printf("  [GOT] 打桩槽 @%lx（映射 %lx-%lx）\n", cnt[i], a, b2); fflush(stdout);
-      }
-    }
+    if (!strstr(line, modname)) continue;
+    segs++;
+    printf("  [GOT] 映射 %lx-%lx %s\n", a, b2, perm);
+    if (a < bias) bias = a;
   }
   fclose(f);
+  if (bias == ~0UL) { printf("  [GOT] 模块没载入\n"); return -2; }
+  unsigned long slot = bias + slotoff;
+  printf("  [GOT] 段=%d bias=%lx 槽=%lx（+%lx）应含 real=%p\n", segs, bias, slot, slotoff, real);
+  void* cur = *(void**)slot;
+  Dl_info di = {0}, dr = {0};
+  if (dladdr(cur, &di)) printf("  [GOT] 槽现值=%p 是 %s（%s）\n", cur, di.dli_sname ? di.dli_sname : "?", di.dli_fname);
+  else printf("  [GOT] 槽现值=%p dladdr 失败\n", cur);
+  if (dladdr(real, &dr)) printf("  [GOT] real 在 %s（%s）\n", dr.dli_fname, dr.dli_sname ? dr.dli_sname : "?");
+  if (cur != real) {
+    printf("  [GOT] 不匹配：链接器把槽解析成了别的东西。用现值当真身继续挂钩。\n");
+    g_orig_tx = cur;
+  }
+  if (mprotect((void*)(slot & ~0xfffUL), 0x2000, PROT_READ | PROT_WRITE) != 0) {
+    printf("  [GOT] mprotect 失败: %s\n", strerror(errno)); return -3;
+  }
+  *(void**)slot = (void*)my_tx;
+  printf("  [GOT] 打桩槽 @%lx 写后读回=%p\n", slot, *(void**)slot); fflush(stdout);
   return 0;
 }
 
@@ -263,7 +272,7 @@ int main(int argc, char** argv) {
   if (getenv("GOT")) {
     g_orig_tx = (void*)dlsym(N.ndk, "AIBinder_transact");
     printf("GOT 钩子安装：real=%p\n", g_orig_tx); fflush(stdout);
-    install_got_hook("android.hardware.audio.core-V4-ndk.so", g_orig_tx);
+    install_got_hook(lib, g_orig_tx);
     g_gotcap = 1;
   }
   if (getenv("CAP")) { g_cap = 1; }
@@ -485,7 +494,7 @@ int auto_build(void* h) {
       printf("GOT 预热 getAudioPorts vec=[%p,%p]\n", *(void**)&vec[0], *(void**)&vec[8]); fflush(stdout);
     } else printf("GOT 预热：没找到 getAudioPorts 符号\n");
     printf("GOT 安装：real=%p\n", g_orig_tx); fflush(stdout);
-    install_got_hook("android.hardware.audio.core-V4-ndk.so", g_orig_tx);
+    install_got_hook(lib, g_orig_tx);
     g_gotcap = 1;
   }
   call_sret3(openOut, bp, args, ret, sret);
