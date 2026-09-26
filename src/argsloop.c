@@ -741,8 +741,73 @@ int auto_build(void* h) {
           tmpl = my;   /* 复用后面的分支，不再走模板路径 */
 
         }
+        /* SAVE=1：把选中的那份 config 从**回包字节**里切出来存盘（wire 元素 = [int32 size][字段…]）。
+         * LOAD=1：反过来 —— 从文件读回字节，交给平台自己的 AudioPortConfig::readFromParcel 解析成
+         * C++ 对象（optional 会正确 engage、string 会正确构造），再清 id 发码 18。
+         * 这一对绕开了"C++ 结构偏移考古"，也是接管轮里框架 config 全空时唯一的模板来源。 */
+        if (getenv("SAVE") && g_cfg_len > 16) {
+          int sv = -1, svsz = 0;
+          for (int q = 0; q + 12 <= g_cfg_len; q += 4) {
+            int sz = *(int*)(g_cfg + q), id = *(int*)(g_cfg + q + 4), port = *(int*)(g_cfg + q + 8);
+            int sr = (q + 20 <= g_cfg_len) ? *(int*)(g_cfg + q + 16) : 0;
+            if (port == want && sz > 16 && sz < 4096 && id >= 0 && id < 4096 &&
+                (sr == 48000 || sr == 44100 || sr == 0)) { sv = q; svsz = sz; break; }
+          }
+          if (sv < 0) printf("  SAVE: 回包里没有 portId=%d 的 config\n", want);
+          else {
+            FILE* fp = fopen(getenv("SAVE"), "wb");
+            if (fp) { fwrite(g_cfg + sv, 1, (size_t)svsz, fp); fclose(fp);
+                      printf("  SAVE: 存了 %d 字节（wire @%d，原 id=%d）到 %s\n", svsz, sv,
+                             *(int*)(g_cfg + sv + 4), getenv("SAVE")); }
+            else printf("  SAVE: 写 %s 失败\n", getenv("SAVE"));
+            fflush(stdout);
+          }
+        }
+        char* usecfg = NULL;
+        if (getenv("LOAD")) {
+          void* raf = dlsym(h, "_ZN4aidl7android5media5audio6common15AudioPortConfig14readFromParcelEPK7AParcel");
+          FILE* fp = fopen(getenv("LOAD"), "rb");
+          if (!raf) printf("  LOAD: 缺 AudioPortConfig::readFromParcel 符号\n");
+          else if (!fp) printf("  LOAD: 打不开 %s（先在 anland 跑一次 SAVE）\n", getenv("LOAD"));
+          else {
+            static uint8_t fb[8192];
+            int rn = (int)fread(fb, 1, sizeof fb, fp); fclose(fp);
+            int sz = *(int*)fb;
+            printf("  LOAD: 读到 %d 字节，元素声明 size=%d\n", rn, sz); fflush(stdout);
+            static char obj[1024]; memset(obj, 0, sizeof obj);
+            AParcel* ip = N.Parcel_create();
+            for (int t = 0; t + 4 <= rn; t += 4) {
+              int32_t v; memcpy(&v, fb + t, 4);
+              ((int(*)(AParcel*, int32_t))N.Parcel_writeInt32)(ip, v);
+            }
+            N.Parcel_setPos(ip, 0);
+            int rrc = ((int(*)(void*, const AParcel*))raf)(obj, ip);
+            printf("  LOAD: readFromParcel rc=%d ⇒ id=%d portId=%d sr=%d mask=%d type=%d\n",
+                   rrc, *(int*)obj, *(int*)(obj + 4), *(int*)(obj + 8), *(int*)(obj + 16),
+                   *(int*)(obj + 24)); fflush(stdout);
+            if (rrc == 0 && *(int*)(obj + 4) == want) usecfg = obj;
+            *(int*)obj = 0;                                   /* id=0 ⇒ 新建 */
+          }
+        }
+        if (usecfg && sac) {
+          static char r9[512]; memset(r9, 0, sizeof r9);
+          static char ok9[8]; static char st9[64];
+          g_capcode = 18; g_cfg_len = 0;
+          call_sret4(sac, bp, usecfg, r9, ok9, st9);
+          void* sv9 = *(void**)st9;
+          int (*gst9)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+          printf("  LOAD: setAudioPortConfig st=%d ok=%d ⇒ 新 id=%d portId=%d\n",
+                 sv9 && gst9 ? gst9(sv9) : -999, *(int*)ok9, *(int*)r9, *(int*)(r9 + 4));
+          fflush(stdout);
+          if (*(int*)r9 > 0) {
+            *(int32_t*)args = *(int*)r9;
+            printf("  LOAD: ★args 的 portConfigId 已改成 %d\n", *(int*)r9); fflush(stdout);
+          }
+          g_capcode = 15;
+          tmpl = usecfg;   /* 让后面模板分支不再动 vector */
+        }
         if (!sac) printf("  ACP: 没有 setAudioPortConfig 符号，跳过\n");
-        else if (!tmpl || (getenv("NOPRE") && atoi(getenv("NOPRE")) == 1)) printf("  ACP: 模板法没命中（stride 反推失败）\n");
+        else if (!tmpl || getenv("LOAD") || (getenv("NOPRE") && atoi(getenv("NOPRE")) == 1)) printf("  ACP: 模板法没命中（stride 反推失败）\n");
         else {
           int oldid = *(int*)tmpl; (void)oldid;
           printf("  ACP: 模板=stride %d 里的 id=%d portId=%d ⇒ 克隆并清 id\n", stride, oldid, want); fflush(stdout);
