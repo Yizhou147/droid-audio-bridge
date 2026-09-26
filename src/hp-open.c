@@ -12,6 +12,22 @@
 typedef void AIBinder;
 typedef void AParcel;
 
+/* AAPCS64：非平凡类型按值返回走隐藏 x8 sret 槽。BpModule::openOutputStream 返回
+ * ndk::ScopedAStatus（析构非平凡）⇒ 必须自己备好 x8，否则 callee 往垃圾地址写（实测定格）。 */
+__asm__(
+".text\n"
+".globl call_sret3\n"
+"call_sret3:\n"      /* (fn, self, args, ret, sret) */
+"  mov x8, x4\n"
+"  mov x5, x0\n"
+"  mov x0, x1\n"
+"  mov x1, x2\n"
+"  mov x2, x3\n"
+"  br  x5\n"
+".previous\n"
+);
+extern void call_sret3(void* fn, void* self, const void* args, void* ret, void* sret);
+
 static void noop_create(void* a) { (void)a; }
 static void noop_destroy(void* a) { (void)a; }
 static int32_t noop_transact(AIBinder* b, uint32_t c, const void* in, void* out) {
@@ -66,8 +82,18 @@ int main(int argc, char** argv) {
   CtorBpModule(bp, &b);
   printf("DIAG BpModule 构造完 vptr=%p\n", *(void**)bp); fflush(stdout);
 
-  int st = openOut(bp, args, ret);
-  printf("OPENOUT st=%d (0=OK; 负数=binder/AIDL 状态码) ret 前 32 字节：", st);
+  static char sret[32]; memset(sret, 0, sizeof sret);
+  call_sret3((void*)openOut, bp, args, ret, sret);
+  void* stobj = *(void**)sret;
+  int st = -99999;
+  if (!stobj) st = 0;                     /* ScopedAStatus 空 = OK */
+  else {
+    int32_t (*AStatus_getStatus)(const void*) = (int32_t(*)(const void*))dlsym(ndk, "AStatus_getStatus");
+    const char* (*AStatus_description)(const void*) = (const char*(*)(const void*))dlsym(ndk, "AStatus_description");
+    if (AStatus_getStatus) st = AStatus_getStatus(stobj);
+    if (AStatus_description) printf("OPENOUT desc=%s\n", AStatus_description(stobj));
+  }
+  printf("OPENOUT st=%d (0=OK) sret=%p ret 前 32 字节：", st, stobj);
   for (int i = 0; i < 32; i++) printf("%02x ", (unsigned char)ret[i]);
   printf("\nVERDICT: %s\n", st == 0 ? "★平台打包的 openOutputStream 事务成功（下一步填字段+取 FMQ）"
                                      : "事务失败，但打包由平台做⇒错义在参数内容，可逐词填");
