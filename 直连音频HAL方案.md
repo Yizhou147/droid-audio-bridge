@@ -1324,3 +1324,18 @@ SINK t=… fed=368640 cons=368640 state=3(ACTIVE) lat=129 xrun=0 data 读=写 �
    - 容器：`tail $LOGD/hal-feeder.log`（应"抓 sink #N → 127.0.0.1:44777"）。
 3. 容器里放音频（`pw-play`/浏览器）→ 板载喇叭出声 = M4 成立。
 4. `sh desk-stop.sh` 交还 → 确认安卓侧 `pkill argsloop` 生效、框架音频恢复。
+
+
+## 35. 【09-26 19:2x ★M4 真接管轮验证通过（容器声音经接管轮外放）】
+
+`AUDIO_BRIDGE=1 AUDIO_ROUTE=a BT_BRIDGE=0` 跑了一次真实 desk-takeover 轮：
+- **§5f 容器 feeder 自动起**：`抓 sink #69 → 127.0.0.1:44777`，一直重连（安卓侧没起时）。
+- **§2b 安卓 sink 自动起踩了个 bug**：老写法 `MISS=$(run 'for…echo $f' | tr '\n' ' ')`，
+  而 `run()` 对空输出也 `printf '%s\n'` ⇒ 全文件齐时 MISS 仍是单个空格 ⇒ `[ -n ]` 恒真 ⇒ 恒 SKIP。
+  手动 `nohup sh halsink.sh 44777` 起后：`feeder 已连` → 连续实时消费（~384 KB/s、`state=ACTIVE`、`xrun=0`）。
+  容器 `pw-play /tmp/beep.wav`（440Hz，-20dBFS）→ **用户在接管轮里听到外放** ⇒ M4 成立。
+- 修：§2b 改成"直接尝试起 halsink + `pgrep -x argsloop` 复验"，不再用脆弱的文件预检。
+  已本地提交（该仓库规则：不 push）。**下一轮 §2b 会自动起 sink**（本轮是手动补的）。
+
+现状：接管轮仍活着，音频链在跑（argsloop 常驻 + feeder 在推）。交还给用户 `desk-stop.sh`
+（teardown 里已含 `pkill -x argsloop` + `pkill -f aa-feeder.sh`，audioserver 随 `start` 复活）。
