@@ -1608,6 +1608,7 @@ int auto_build(void* h) {
      * HAL 下一次 writeBlocking 算出"队列满"就永远阻塞（cmd 读指针冻在 16、data 读冻在 1920）。
      * 正解：发命令前/收包前都要按 availableToRead 等，且**一问一答**。 */
     int tones = flag("TONE") ? atoi(getenv("TONE")) : 0;
+    int tonech = getenv("TONECH") ? (getenv("TONECH")[0] | 32) : 'B';   /* 'l'/'r'/'b' */
     /* 一律用 flag()：脚本里 TONE/AMP/ROUNDS 传的是空串，空串也算"已设置"，
      * 按 getenv 判就会 atoi("")=0 ⇒ 上一版轮数成 0，一帧都没投（也就没出声）。 */
     double amp = flag("AMP") ? atof(getenv("AMP")) : 3.2e7;      /* 满幅的 1.5% ⇒ 很轻 */
@@ -1633,9 +1634,13 @@ int auto_build(void* h) {
         for (int f = 0; f < nf; f++) {
           int32_t v = (int32_t)(amp * sin(2.0 * M_PI * (double)tones *
                                           (double)(gframe + (unsigned long long)f) / 48000.0));
+          /* TONECH=L/R 只喂一个声道，用来判左右 driver 分别吃哪一路输入通道（默认 B=两路都给）。 */
+          int32_t vl = v, vr = v;
+          if (tonech == 'L') vr = 0;
+          else if (tonech == 'R') vl = 0;
           uint64_t o1 = (wp + (uint64_t)f * 8) % dcap, o2 = (wp + (uint64_t)f * 8 + 4) % dcap;
-          memcpy(dq + 16 + o1, &v, 4);
-          memcpy(dq + 16 + o2, &v, 4);
+          memcpy(dq + 16 + o1, &vl, 4);
+          memcpy(dq + 16 + o2, &vr, 4);
         }
         gframe += (unsigned long long)nf;
       } else {
