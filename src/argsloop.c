@@ -1206,7 +1206,11 @@ int auto_build(void* h) {
       *(int32_t*)(cq + 16) = tag;                           /* union tag */
       *(int32_t*)(cq + 20) = payload;                       /* Void ⇒ 0；burst 等用它 */
     }
-    *(uint64_t*)(cq + wo) = wcnt + 1;                       /* 生产者推进 */
+    /* 关键：FMQ 的读写指针**按字节**计（availableToRead()=bytes/quantum）。
+     * 命令元素是 8 字节 ⇒ 推进 1 会被算成 0 个可读元素，对侧醒来又睡回去。
+     * WINC 默认 8（quantum of Command）。 */
+    uint64_t winc = getenv("WINC") ? (uint64_t)atoll(getenv("WINC")) : 8;
+    *(uint64_t*)(cq + wo) = wcnt + winc;                    /* 生产者推进 */
     /* libfmq 的 Futex::notify() 是"先把状态字写成 1，再 FUTEX_WAKE"；
      * 只 WAKE 不改值 ⇒ 等的人在 wait() 里复查发现还是 0，又睡回去 —— 这正是
      * 前面几轮 write_db CPU 一直 0 的原因。FOFF 默认 24 = grantor 表里 q0 的事件字。 */
