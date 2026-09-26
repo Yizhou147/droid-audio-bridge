@@ -85,6 +85,9 @@ int main(int argc, char** argv) {
     /* 全零 args：V2/V4 的 Arguments 都远小于这个尺寸，给足余量 */
     static uint8_t args[2048];
     memset(args, 0, sizeof args);
+    if (getenv("FILL")) {   /* 每个 4 字节拍一个唯一标记 0x51xx，看它落到包里哪个偏移 */
+      for (int k = 0; k < 96; k++) { int32_t v = 0x5100 + k; memcpy(args + 4 * k, &v, 4); }
+    }
     const char* wname =
       "_ZNK4aidl7android8hardware5audio4core7IModule25OpenOutputStreamArguments13writeToParcelEP7AParcel";
     int (*writeArgs)(const void*, AParcel*) = (int (*)(const void*, AParcel*))dlsym(h, wname);
