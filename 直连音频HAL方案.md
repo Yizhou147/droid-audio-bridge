@@ -493,3 +493,30 @@ system_suspend 存活），AAudio 复用 anland 态已验证的真链路（音�
   ⇒ 数据面只能走 `StreamDescriptor`/`AudioRingBuffer`（FMQ），其 fd 从 `getStreamCommon` 回包里取。
 - 遗留：我在 `default` 上开了 10+ 条流没关（fd 74→77、线程 35→36，端口被 `maxActiveStreamCount:1` 占住）；
   清法＝重启安卓或 `pkill -x android.hardware.audio.service`（**属改动设备状态，等用户点头**）。
+
+## 19. 【09-26 11:12 干净 sweep】修正 §17/§18 的两处归因，并给出卡点
+
+每个 id **单独清日志 + 单独记 fd 增量**重跑（12 个 id）：
+
+```
+底 fd=77 thr=36
+id=54 already has a stream opened      id=55 already has a stream opened
+id=56 existing port config id 56 not found   id=57 同 not found
+id=58 does not correspond to a mix port
+id=59/60/61/62/63 already has a stream opened
+id=64/65 not found
+```
+
+由此定案三件事：
+1. **§17 的"哪个 id 成功了"归因错了**：那是 `logcat -t 3` 窗口太窄造成的假象（同一条错误被下一条覆盖）。
+   真实情况＝11:02 那次 sweep 里**至少开出了 3 条流**（fd 74→77、线程 35→36 是真的），但**具体哪个 id** 没钉住。
+2. **`st=0` 不是成功证据**：QTI 的 `openOutputStream` 失败时**吞掉错误、回 OK+空对象**
+   （`port config id 92 ... not found` 之后仍 `TRANSACT st=0`、`ret` 全零）。
+   ⇒ 唯一可信判据是 **HAL 的 fd/线程/`/dev/shm` 增量**（+ 之后 readBack 推进）。
+3. **字段编码已被 HAL 原样念出，确认无误**：`port config id 92, has offload info? 0, **buffer size 2048 frames**`
+   （id / offload presence / i64 buffer size 三处都对上）⇒ 88B 骨架这块可以定案收尾。
+
+**当前卡点**：所有合法 mix port 都被"已开流"占满（我 sweep 开的 + 接管前 audioserver 的僵尸流），
+`STREAM` 模式因此拿不到句柄（回包空）。**要清场只能重启音频 HAL**
+（`pkill -x android.hardware.audio.service` 之类，init 会自动拉回，属"改动设备运行状态"，等你点头再做）。
+清场后一次只试一个 id：fd 增长＝开成 → 抽 `IStreamOut` 句柄 → `getStreamCommon` 取 FMQ fd → mmap → 写零帧。
