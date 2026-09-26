@@ -1390,3 +1390,10 @@ L/R 诊断（toneL/toneR/beep 各放一次，用户听）：
 ### 37.2 现状与收尾
 本轮音频链仍在跑（左pair 有声、右pair 无声）。交还安卓走 desk-stop（会清 argsloop/feeder/droid_out、
 audioserver 复活）——**是否现在交还由用户决定**。
+
+
+### 37.3 新事实（09-26 20:4x）+ 事故复盘
+- **顶格音量下仍只有左侧两 driver 响** ⇒ 与电平无关，右pair(ch2/ch3) 根本没喂到/没使能。诊断坐实"数据没到右侧"。
+- **事故**：我把实时 anland 音频(#63, 视频正以最大音量放)灌进无音量控制的直连 sink → 顶格炸响、无法关小 → 用户强启。已写《工作总结》§7 音频红线。教训：诊断只用内部小 AMP 的 `TONE`/zero，读日志优先，出声前单独请示。
+- **仍待证的头号假设**：框架放视频走 **LOW_LATENCY(io13,type1)**，我们走 **DEEP_BUFFER(type2)**，PAL 层其它参数(getDeviceConfig ch4 / isChannelSupported 2 / Multi channel speaker / hw_ep ch4)**两边一致** ⇒ 差异可能在 usecase 的 AGM 图（low_latency 的 speaker 图带立体声→4功放分配，deep_buffer 的可能没有）。
+- 已备好 `out/dump/mix1_lowlatency.bin`（portId 1 的 AudioPortConfig 线节，src id 54）+ 扬声器 dev23.bin/patch0.bin，可在**安全方式**下验 low_latency 是否补齐四喇叭。
