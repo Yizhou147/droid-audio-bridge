@@ -594,6 +594,15 @@ int auto_build(void* h) {
     /* BpInterface 的成员偏移不猜：对象里"某个 word 的 vptr 属于 libbinder*（即 AIBinder 实现
      * 如 ACppBpBinder）"才是真句柄。扫前 24 个 word 找它。 */
     if (hv && dv.dli_sname && strstr(dv.dli_sname, "BpStreamOut")) {
+      /* 静态解 vtable 走不通（.rela.dyn 是 SHT_ANDROID_RELA 紧凑格式），运行期直接问 dladdr。
+       * slot k 对应事务码 k+1（AIDL Bp 类的固定规律）。 */
+      for (int k = 0; k < 24; k++) {
+        void* fn = *(void**)((char*)vptr + 16 + 8 * k);
+        Dl_info df = {0};
+        if (dladdr(fn, &df) && df.dli_sname)
+          printf("  VT 码%-2d = %p %s\n", k + 1, fn, df.dli_sname);
+      }
+      fflush(stdout);
       for (int k = 0; k < 24; k++) {
         void* w = *(void**)((char*)cand + 8 * k);
         if (!readable(w)) continue;
