@@ -616,6 +616,8 @@ int auto_build(void* h) {
     (int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))dlsym(N.ndk, "AIBinder_transact");
   int (*rFd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
   int (*rFd2)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readFileDescriptor");
+  hunt_fds("Return(平台解析后的结构)", ret, 512);
+  hunt_fds("greply(抓到的原始回包)", g_greply, g_greply_len);
   AIBinder* stream = NULL;
   printf("RETSHEAP ");
   for (int off = 0; off < 128; off += 8) { void* w = *(void**)(ret + off);
