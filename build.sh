@@ -49,6 +49,10 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/argsdump.c -o out/argsdump
 
+# 让平台自己打包 openOutputStream（构造 BpModule 直调）
+"$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
+    src/hp-open.c -o out/hp-open
+
 # 轮内 activity 服务桩（让 audioserver 走完 onFirstRef 的 waitForService("activity")）
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
     src/activity-stub.c -o out/activity-stub
