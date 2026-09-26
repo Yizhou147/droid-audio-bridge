@@ -1260,3 +1260,36 @@ rpy  映射 4096，元素 56 字节（容量=56 ⇒ 只有 1 个槽！）
 - 现状：`argsloop` 是探针工具，不是常驻守护；出声用的是进程内 `sin()`。
 - 目标：容器 PipeWire monitor → TCP 回环 → 一个常驻 sink 进程，把 PCM 连续喂进上面这条已跑通的链。
 - 待定：位置上报不可用（obs=0/hw=-1）⇒ 容器侧时钟/节流按字节率（48000×8 B/s）自算。
+
+
+## 33. 【09-26 19:1x M3 落地：argsloop SINK 常驻 sink（容器 PCM → HAL 外放）】
+
+计划文件 `~/.qoder/plans/silent-marsh-swift.md`（用户选：先做独立 sink、复用 argsloop）。
+
+### 33.1 实现
+- `src/argsloop.c` 新增 `SINK=<port>` 模式（放在已跑通的 SESSION 块之后，互不影响）：
+  监听 127.0.0.1:port → accept 容器 feeder → 收 s16/48k/立体声 → **每样本 <<16 转 s32**
+  → 写 dataMQ 环（按 `availableToWrite` 限幅）→ `burst(字节)` → 一问一答收单槽回包。
+  欠载（feeder 慢/断）补零保活；`SIGTERM/SIGINT` 置 `g_sink_run=0` 收尾退。
+  dcap 走 `SINKDCAP` 旋钮，默认仍 `g_qsz[2]>16408?16384:0`。
+- `bin/halsink.sh`：安卓侧起流（`APC=1 LOAD/LOAD2 + PP=1 SENDP POKE=0:0 + SINK=port`，`exec argsloop` 前台常驻）。
+- 模板入库 `artifact/{mix2,dev23,patch0}.bin`（换机型回 anland 重抓）。
+
+### 33.2 实测（接管轮条件：audioserver 已停，喂 `/dev/zero` 与真 440Hz s16）
+```
+SINK: 监听 127.0.0.1:44777 …
+setAudioPatch: created [deep_buffer_out -> speaker] AudioPatch{id:1, [53],[54]}
+configure : stream is configured  (pal_stream_open/start 118ms)
+SINK t=… fed=368640 cons=368640 state=3(ACTIVE) lat=129 xrun=0 data 读=写 剩=16384
+```
+- 零 PCM：~1s 内 fed=cons≈368640 B、每秒 +384000 ⇒ **实时率正确、零 xrun、一问一答不堵死**（对比 §31.6 的卡死）。
+- 真 440Hz s16（amp 4000≈-18dBFS，带 80ms 淡入淡出）也全消费、state=ACTIVE、xrun=0。
+
+### 33.3 与旧 aa-bridge 的分工
+- `aa-bridge`（AAudio→audioserver）只在 **B′ 路/框架音频活着** 时可用；接管轮 audioserver 死 ⇒ 废。
+- `halsink.sh`+`argsloop SINK` 是 **A 路** 的终点，接管轮里独立成立。容器侧 `aa-feeder.sh` 两路通用。
+
+### 33.4 待办（M4，需与用户约时间）
+- 接进 `droid-drm-takeover/desk-takeover.sh` 的 AUDIO_BRIDGE 块（起 halsink + 容器 aa-feeder）
+  与 `desk-stop/rollback`（`pkill -x argsloop` + 交还时 `ctl.start audioserver`）。
+- 真容器应用出声试听（`pw-play`）；换机型重抓模板；`BURSTFR` 语义在真信号下再复验一次。

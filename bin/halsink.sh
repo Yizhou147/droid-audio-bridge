@@ -21,7 +21,7 @@ done
 echo "HAL sink 起：SINK=$PORT（等容器 feeder 连；Ctrl-C 收）"
 PIDF=0 SINK="$PORT" \
   APC=1 APCPORT=2 LOAD="$D/mix2.bin" LOAD2="$D/dev23.bin" DEVPORT=23 \
-  PP=1 LOADP="$D/patch0.bin" PAUTO=1 SENDP=1 \
+  PP=1 LOADP="$D/patch0.bin" PAUTO=1 SENDP=1 POKE=0:0 \
   AUTO=1 TRANSACT=1 STREAM=1 GOT=1 \
   SVC=android.hardware.audio.core.IModule/default \
   IN="55;1;8;0;0;L:2048;B;B" \
