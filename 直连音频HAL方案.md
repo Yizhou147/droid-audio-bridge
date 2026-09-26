@@ -384,3 +384,20 @@ B) 回到"让 audioserver（及 system_server 侧依赖）不被 stop"的路，A
 而音频栈要用到它们；再加 4 个桩也只是把 audioserver 的初始化糊过去，AAudio 仍拿不到流。
 ⇒ 于是 B 只剩一种可行形态：**不让 `stop` 碰它们**（把整颗 `stop` 改成按需逐个停），这需要改 `desk-takeover.sh` 并实跑一轮验证。
 A 路（直连 HAL）不受此影响：HAL 在轮里本来就活着且可服务（`getAudioPorts` 稳定回 19164B/816B），只差 `Arguments` 那一处布局。
+
+### 14.1 矩阵也是同码 ⇒ 失败点不在载荷字段序（重要负结果）
+
+`ARGS6` 七种字段形状（有/无 SM presence、SM size 8/12/16、head 0/1、len 0/1、有无两个 binder 尾、
+先 version 还是先 presence）**全部 `st=0x80000008`、回包 0 字节**；而 `ARGS2 env=1`（只发 size+A）
+也是同码。唯一能改变错码的动作是**删掉异常头**（→ -22）。副作用侧同时为零：
+`audiohalservice.qti` fd 数 74→74、`/dev/shm` 计数 0→0、线程数不变、HAL 零日志。
+
+⇒ 结论：**服务端在"读完异常头之后、进入任何字段分支之前"就统一失败**，与载荷内容无关。
+这把"猜字段序"这条路彻底关掉；剩下的可能是
+(i) 该服务对 code 15 的**签名/版本≠我们反汇编的 V2 `OpenOutputStreamArguments`**（Android 16 的
+    `openOutputStream(IOStreamConfig, out IStreamOut, IStreamCallback, IStreamOutEventCallback)` 形态），
+    需要先确认运行中 HAL 的**实际 AIDL 版本**（`getInterfaceVersion`=码 0xFEFFFFFF，可直接问）；
+(ii) 或该 HAL 把 `openOutputStream` 实现为**不支持/需先决条件**，在未分配任何资源前就抛
+    `EX_SERVICE_SPECIFIC`（`0x80000000|8` 正是它的编码）。
+下一步（便宜且判据明确）：**先问 `getInterfaceVersion` 与 `getInterfaceHash`**（码 0xFEFFFFFF / 0xFEFFFFFE，
+都是零参数、无 fd），把 (i) 钉死；若版本不是 2，就直接按真实版本的 Arguments 重排。
