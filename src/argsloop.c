@@ -1118,7 +1118,7 @@ int auto_build(void* h) {
       int vidx = getenv("VPINDEX") ? atoi(getenv("VPINDEX")) : 1;   /* 0=bool 1=int 2=float 3=string */
       printf("  VPNEW: read=%p write=%p id=\"%s\" val=%d idx=%d\n", vrd, vwr, vid, vval, vidx);
       if (vrd) {
-        char objs[64]; strncpy(objs, getenv("VPOBJS") ? getenv("VPOBJS") : "8,2,16,4,12", sizeof objs - 1);
+        char objs[64]; strncpy(objs, getenv("VPOBJS") ? getenv("VPOBJS") : "0", sizeof objs - 1);
         objs[sizeof objs - 1] = 0;
         size_t idl = strlen(vid);
         size_t idpad = (idl + 4) & ~(size_t)3;
@@ -1126,15 +1126,20 @@ int auto_build(void* h) {
         while (w) {
           int osz = atoi(w);
           AParcel* p = N.Parcel_create();
-          N.Parcel_writeInt32(p, 1);
-          N.Parcel_writeInt32(p, osz);
+          /* readFromParcel 只解**载荷**：[flag][objectSize] 是外层 vector 写的，带上就 -61。
+           * 所以 VPOBJS 这里当"要不要结构头"的开关用：0=不带（默认），>0=带上 [1][osz] 试兼容。 */
+          if (osz > 0) {
+            N.Parcel_writeInt32(p, 1);
+            N.Parcel_writeInt32(p, osz);
+          }
           N.Parcel_writeInt32(p, (int32_t)idl);
           for (size_t t = 0; t < idpad; t += 4) {
             int32_t chunk = 0;
             if (t < idl) memcpy(&chunk, vid + t, idl - t >= 4 ? 4 : idl - t);
             N.Parcel_writeInt32(p, chunk);
           }
-          N.Parcel_writeInt32(p, 1);
+          /* union：非空 union 到底带不带 statusHeader，用 VPUNHDR 选（默认带） */
+          if (getenv("VPUNHDR") ? atoi(getenv("VPUNHDR")) : 1) N.Parcel_writeInt32(p, 1);
           N.Parcel_writeInt32(p, vidx);
           N.Parcel_writeInt32(p, vval);
           static char vobj[256];
