@@ -710,9 +710,10 @@ int auto_build(void* h) {
           nid = *(int*)res3;
           if (nid > 0) {
             printf("  ACP3: ★新 portConfigId = %d（只有我们在用）\n", nid); fflush(stdout);
-            N.Parcel_setPos(args, 8);
-            ((int(*)(AParcel*, int32_t))N.Parcel_writeInt32)(args, nid);
-            N.Parcel_setPos(args, 0);
+            /* auto_build 里的 args 是**平台解出来的 C++ OpenOutputStreamArguments 结构**
+             * （不是 AParcel！上一版拿它当 AParcel 用 ⇒ SIGSEGV @0x58）。
+             * 第一个字段就是 portConfigId ⇒ 直接改内存。 */
+            *(int32_t*)args = nid;
           }
           g_capcode = 15;
         }
