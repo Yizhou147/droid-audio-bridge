@@ -26,7 +26,7 @@ static struct {
   void (*setContentType)(AAudioStreamBuilder*, int32_t);
   int32_t (*open)(AAudioStreamBuilder*, AAudioStream**);
   int32_t (*start)(AAudioStream*);
-  int64_t (*write)(AAudioStream*, const void*, int32_t, int64_t);
+  int32_t (*write)(AAudioStream*, const void*, int32_t, int64_t);   /* 本设备返回 int32！按 int64 读会越界取垃圾 */
   int32_t (*stop)(AAudioStream*);
   int32_t (*close)(AAudioStream*);
   int32_t (*getSampleRate)(const AAudioStream*);
@@ -37,7 +37,7 @@ static struct {
   int32_t (*burst)(const AAudioStream*);
   int32_t (*capacity)(const AAudioStream*);
   int32_t (*xrun)(const AAudioStream*);
-  int64_t (*written)(const AAudioStream*);
+  int32_t (*written)(const AAudioStream*);                            /* 同上：int32 解释对本量级无损 */
   int32_t (*deviceId)(const AAudioStream*);
   const char* (*resultText)(int32_t);
 } A;
@@ -134,12 +134,12 @@ int main(void) {
   int64_t total = 0; int loops = 0;
   /* 每次写一个 burst，阻塞超时 200ms；总计约 ms 毫秒 */
   while (loops * 20 < ms) {
-    int64_t w = A.write(st, buf, burst, 200 * 1000 * 1000);
+    int32_t w = A.write(st, buf, burst, 200 * 1000 * 1000);
     if (w < 0) { printf("STEP4 write rc=%lld%s\n", (long long)w,
                          (A.resultText && w > -1000) ? A.resultText((int)w) : ""); fflush(stdout); break; }
     total += w; loops++;
   }
-  int64_t wrote = A.written(st);
+  int32_t wrote = A.written(st);
   int xr = A.xrun(st);
   printf("STEP4 wrote totalFrames=%lld in %d writes; framesWritten=%lld xrun=%d\n",
          (long long)total, loops, (long long)wrote, xr);

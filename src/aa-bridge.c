@@ -37,7 +37,7 @@ static struct {
   void (*setUsage)(AAudioStreamBuilder*, int32_t);
   int32_t (*open)(AAudioStreamBuilder*, AAudioStream**);
   int32_t (*start)(AAudioStream*);
-  int64_t (*write)(AAudioStream*, const void*, int32_t, int64_t);
+  int32_t (*write)(AAudioStream*, const void*, int32_t, int64_t);   /* 本设备返回 int32！按 int64 读会越界取垃圾 */
   int32_t (*stop)(AAudioStream*);
   int32_t (*close)(AAudioStream*);
   int32_t (*getSampleRate)(const AAudioStream*);
@@ -46,7 +46,7 @@ static struct {
   int32_t (*burst)(const AAudioStream*);
   int32_t (*capacity)(const AAudioStream*);
   int32_t (*xrun)(const AAudioStream*);
-  int64_t (*written)(const AAudioStream*);
+  int32_t (*written)(const AAudioStream*);                            /* 同上：int32 解释对本量级无损 */
   int32_t (*deviceId)(const AAudioStream*);
   const char* (*resultText)(int32_t);
 } A;
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
       have += (size_t)n;
       continue;
     }
-    int64_t w = A.write(st, buf, burst, 100 * 1000 * 1000);
+    int32_t w = A.write(st, buf, burst, 100 * 1000 * 1000);
     if (w < 0) { fprintf(stderr, "write rc=%lld %s\n", (long long)w,
                           (A.resultText && w > -1000) ? A.resultText((int)w) : ""); break; }
     memmove(buf, buf + (size_t)w * bpf, have - (size_t)w * bpf);
