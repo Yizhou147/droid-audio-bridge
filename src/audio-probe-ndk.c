@@ -161,7 +161,8 @@ int main(int argc, char** argv) {
             wI32(in2, 1); wI32(in2, 48000);      /* Int sampleRate */
             wI32(in2, 1); wI32(in2, 1);           /* format{PCM} 粗试 */
             wI32(in2, 0); wI32(in2, 0);           /* mode, flags */
-            int st2 = N.Transact(b, 15, &in2, &out2, 0);
+            uint32_t txf = (uint32_t)strtoul(getenv("TXF") ? getenv("TXF") : "0", NULL, 0);  /* 0x10=ACCEPT_FDS：openOutputStream 回包带 FMQ 的 fd */
+          int st2 = N.Transact(b, 15, &in2, &out2, txf);
             printf("M1c openOutputStream st=%d\n", st2); fflush(stdout);
             if (out2) {
               int32_t ex2=-1, h2=-1;
@@ -232,8 +233,8 @@ int main(int argc, char** argv) {
           int st2 = N.Transact(b, 15, &in2, &out2, 0);
           int32_t ex2 = -1, h2 = -1;
           if (out2) { N.Parcel_readInt32(out2, &ex2); N.Parcel_readInt32(out2, &h2); }
-          printf("ARGS2 A=%d head=%d pres=%d env=%d → st=%d ex=%d first=%#x %s\n",
-                 v->a, v->head, v->smPres, v->onlyEnv, st2, ex2, (unsigned)h2,
+          printf("ARGS2 TXF=%#x A=%d head=%d pres=%d env=%d → st=%d ex=%d first=%#x %s\n",
+                 txf, v->a, v->head, v->smPres, v->onlyEnv, st2, ex2, (unsigned)h2,
                  (st2 == 0 && ex2 == 0) ? "VERDICT-M1: unmarshal 过了，看 first" : "");
           fflush(stdout);
           if (st2 == 0 && ex2 == 0 && out2) {
