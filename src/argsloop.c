@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -290,5 +291,54 @@ int auto_build(void* h) {
   printf("TRANSACT st=%d ret前6int=", st);
   for (int k = 0; k < 6; k++) { int32_t v; memcpy(&v, ret + 4 * k, 4); printf("%d ", v); }
   printf("\n"); fflush(stdout);
-  return st == 0 ? 0 : 8;
+  if (st != 0 || !getenv("STREAM")) return st == 0 ? 0 : 8;
+
+  /* §18.1：从 Return 缓冲里扫候选指针 ⇒ 若其 vptr 像 C++ 对象且 +8 处像 AIBinder*，
+   * 就拿它对 code 1 (getStreamCommon) 发一次原始事务；st=0 且回包非空即命中 stream 句柄。 */
+  int (*Prep2)(AIBinder*, AParcel**) = (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
+  int (*Tx2)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t) =
+    (int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))dlsym(N.ndk, "AIBinder_transact");
+  int (*rFd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
+  int (*rFd2)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readFileDescriptor");
+  AIBinder* stream = NULL;
+  for (int off = 0; off + 16 <= (int)sizeof(ret); off += 8) {
+    void* cand = *(void**)(ret + off);
+    if ((uintptr_t)cand < 0x1000 || (uintptr_t)cand > 0x800000000000UL) continue;
+    void* vptr = *(void**)cand;
+    if ((uintptr_t)vptr < 0x1000) continue;
+    void* maybe = *(void**)((char*)cand + 8);
+    if (!maybe) continue;
+    AParcel* in3 = NULL; AParcel* out3 = NULL;
+    if (!Prep2((AIBinder*)maybe, &in3)) {
+      N.Parcel_writeInt32(in3, 0);
+      int s3 = Tx2((AIBinder*)maybe, 1, &in3, &out3, 0);
+      size_t sz3 = out3 ? N.Parcel_dataSize(out3) : 0;
+      if (s3 == 0 && sz3 > 4) {
+        printf("STREAM 命中: ret+%d cand=%p vptr=%p binder=%p getStreamCommon st=%d reply=%zu\n",
+               off, cand, vptr, maybe, s3, sz3); fflush(stdout);
+        stream = (AIBinder*)maybe;
+        int32_t e3 = -1;
+        N.Parcel_setPos(out3, 0);
+        int (*rI)(const AParcel*, int32_t*) = (int(*)(const AParcel*, int32_t*))dlsym(N.ndk, "AParcel_readInt32");
+        if (rI) rI(out3, &e3);
+        printf("  reply ex=%d\n", e3);
+        for (int pos = 4; pos + 4 <= (int)sz3; pos += 4) {
+          int fd = -1;
+          int rr = rFd ? (N.Parcel_setPos(out3, pos), rFd(out3, &fd)) : -1;
+          if (rr == 0 && fd >= 0 && fd < 4096) {
+            int valid = (int)syscall(2, fd, 1, 0);   /* sys_fcntl(F_GETFD) 走不了就直接报数 */
+            printf("  fd@%d = %d (probe=%d)\n", pos, fd, valid);
+            fflush(stdout);
+          }
+          if (rFd2) { int f2 = -1; N.Parcel_setPos(out3, pos); if (rFd2(out3, &f2) == 0 && f2 >= 0 && f2 < 4096) { printf("  FileDescriptor@%d = %d\n", pos, f2); fflush(stdout); } }
+        }
+        break;
+      }
+    }
+  }
+  printf(stream ? "VERDICT-M2a: 拿到 IStreamOut 句柄（可继续取 FMQ）\n" : "M2a: 未命中 stream 句柄\n");
+  fflush(stdout);
+  return stream ? 0 : 9;
 }
+#include <sys/syscall.h>
+
