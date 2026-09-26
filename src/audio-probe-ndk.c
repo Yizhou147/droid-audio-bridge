@@ -212,6 +212,32 @@ int main(int argc, char** argv) {
           fflush(stdout);
         }
       }
+      if (getenv("ARGS4")) {
+        /* 09-26 内联定案后重造：请求**不写异常头**（CAL9 实测：第一个 int 就是第一个参数的字段）。
+         * 于是 Arguments 的读序＝[size][version][pres][SourceMetadata(size,head,len)][pres=0][i64][cb][evcb]
+         * size 含自身＝44；扫 size 口径与 version 值。判据：st=0 且 HAL 出现 openOutputStream 日志/线程。 */
+        int (*wI32)(AParcel*, int32_t) = (void*)dlsym(N.h, "AParcel_writeInt32");
+        int (*wI64)(AParcel*, int64_t) = (void*)dlsym(N.h, "AParcel_writeInt64");
+        static const int32_t szs[] = {44, 40};
+        static const int32_t vers[] = {0, 1, 2};
+        for (unsigned i = 0; i < 2; i++) for (unsigned j = 0; j < 3; j++) {
+          AParcel* in6 = NULL; AParcel* out6 = NULL;
+          if (N.Prepare(b, &in6) != 0) break;
+          wI32(in6, szs[i]);
+          wI32(in6, vers[j]);
+          wI32(in6, 1);                                    /* SourceMetadata presence */
+          wI32(in6, 12); wI32(in6, 1); wI32(in6, 0);       /* SM: size, head=1, len=0 */
+          wI32(in6, 0);                                    /* offload presence=0 */
+          if (wI64) wI64(in6, 0); else { wI32(in6, 0); wI32(in6, 0); }
+          wI32(in6, 0); wI32(in6, 0);                      /* 两个可空 binder */
+          int s6 = N.Transact(b, 15, &in6, &out6, 0);
+          int32_t e6 = -1, h6 = -1;
+          if (out6) { N.Parcel_readInt32(out6, &e6); N.Parcel_readInt32(out6, &h6); }
+          printf("ARGS4 size=%d ver=%d st=%d ex=%d first=%#x %s\n", szs[i], vers[j], s6, e6,
+                 (unsigned)h6, (s6 == 0) ? "★事务通了（看 HAL 日志确认是否真开流）" : "");
+          fflush(stdout);
+        }
+      }
       if (getenv("ARGS3")) {
         /* 09-26 实锤：必须带 FLAG_ACCEPT_FDS，否则 openOutputStream 的回包（含 FMQ 的 fd）被驱动拒掉，
          * 看到的 0x80000008 是假象；带上 0x10 后变成 -22＝读端"size<4"分支 ⇒ 怀疑请求**没有异常头**，
