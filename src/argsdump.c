@@ -85,13 +85,31 @@ int main(int argc, char** argv) {
     /* 全零 args：V2/V4 的 Arguments 都远小于这个尺寸，给足余量 */
     static uint8_t args[2048];
     memset(args, 0, sizeof args);
-    if (getenv("FILL")) {   /* 每个 4 字节拍一个唯一标记 0x51xx，看它落到包里哪个偏移 */
-      for (int k = 0; k < 96; k++) { int32_t v = 0x5100 + k; memcpy(args + 4 * k, &v, 4); }
-    }
     const char* wname =
       "_ZNK4aidl7android8hardware5audio4core7IModule25OpenOutputStreamArguments13writeToParcelEP7AParcel";
     int (*writeArgs)(const void*, AParcel*) = (int (*)(const void*, AParcel*))dlsym(h, wname);
     if (!writeArgs) { printf("  没有导出 Arguments::writeToParcel\n"); fflush(stdout); continue; }
+    /* MAP 模式：逐词打点（其余保持合法 0）⇒ 反查"结构体第 k 个 int 落到 parcel 哪个偏移"。
+     * 一次进程内跑完 24 个词，不重复 dlopen。 */
+    if (getenv("MAP")) {
+      for (int k = 0; k < 24; k++) {
+        memset(args, 0, sizeof args);
+        int32_t mark = 0x5100 + k;
+        memcpy(args + 4 * k, &mark, 4);
+        AParcel* pm = N.Parcel_create();
+        if (!pm) break;
+        int stm = writeArgs(args, pm);
+        static uint8_t b[4096]; int len = 0;
+        spill(pm, b, sizeof b, &len);
+        int found = -1;
+        for (int o = 0; o + 4 <= len; o += 4) { int32_t v; memcpy(&v, b + o, 4); if (v == mark) { found = o; break; } }
+        int32_t sz = 0; if (len >= 4) memcpy(&sz, b, 4);
+        printf("MAP k=%2d st=%d parcel_size=%d mark@=%d %s\n", k, stm, sz, found,
+               found < 0 ? (stm ? "(该词是对象/指针，写时报错或被丢弃)" : "(未出现：被跳过或当作对象读)") : "");
+        fflush(stdout);
+      }
+      continue;
+    }
     AParcel* p = N.Parcel_create();
     if (!p) { printf("  AParcel_create 失败\n"); continue; }
     int st = writeArgs(args, p);
