@@ -660,91 +660,64 @@ int auto_build(void* h) {
       printf("  APC 头 20 个 int32:");
       for (int t = 0; t < 20 && t*4 < g_cfg_len; t++) printf(" %d", *(int*)(g_cfg + 4*t));
       printf("\n"); fflush(stdout);
-      int n = g_cfg_len > 8 ? *(int*)(g_cfg + 8) : 0;           /* [ex][arrSize][count] */
-      int o = 12, found = -1;
-      for (int k = 0; k < n && o + 12 <= g_cfg_len; k++) {
-        int sz = *(int*)(g_cfg + o), id = *(int*)(g_cfg + o + 4), port = *(int*)(g_cfg + o + 8);
-        if (k < 6 || port == want)
-          printf("    cfg[%d] size=%d id=%d portId=%d%s\n", k, sz, id, port,
-                 port == want ? "  <== 选中" : "");
-        if (port == want && found < 0) found = o;
-        o += sz;
-      }
-      if (found < 0) {
-        /* 严格走表失败 ⇒ 值扫描兜底：找 [size][id][portId==want] 三元组，size 要合理 */
-        printf("  APC: 严格走表没找到（count=%d）⇒ 改值扫描\n", n); fflush(stdout);
-        for (int q = 0; q + 12 <= g_cfg_len; q += 4) {
-          int sz = *(int*)(g_cfg + q), id = *(int*)(g_cfg + q + 4), port = *(int*)(g_cfg + q + 8);
-          if (port == want && sz > 12 && sz < 2048 && id >= 0 && id < 4096) {
-            printf("  APC: 值扫描命中 @%d size=%d id=%d portId=%d\n", q, sz, id, port);
-            found = q; fflush(stdout); break;
-          }
-        }
-        if (found < 0) printf("  APC: 值扫描也没找到 portId=%d\n", want);
-      }
-      /* ACP2：不碰 wire —— 直接给平台一个**清零**的 AudioPortConfig（只填 id=0 / portId），
-       * 让它自己打包发码 18。签名（从 core-V4 符号表读）：
-       *   setAudioPortConfig(const AudioPortConfig&, AudioPortConfig* 出参, bool updateExisting)
-       * 清零的 libc++ std::string = 空串、shared_ptr = null ⇒ 合法对象。
-       * 其余字段留给 HAL 按端口默认填，看它回显什么再决定要不要补。 */
+      /* ACP3：拿平台刚解析出来的**真 config**（getAudioPortConfigs 填的 vector）当模板，
+       * 只把 id 清 0 再交给 setAudioPortConfig ⇒ 其它字段（采样率/掩码/格式/flags）都是完整合法的，
+       * 正好治 §"fully specified? 0"。元素长度未知 ⇒ 用 (end-begin)/9 反推并校验。 */
       void* sac = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule18"
                     "setAudioPortConfigERKNS0_5media5audio6common15AudioPortConfigEPS8_Pb");
-      if (sac) {
-        static char cfg[512]; memset(cfg, 0, sizeof cfg);
-        static char res[512]; memset(res, 0, sizeof res);
-        static char st6[64]; memset(st6, 0, sizeof st6);
-        static char okflag[8]; memset(okflag, 0, sizeof okflag);   /* 第三参是 bool* */
-        *(int32_t*)(cfg + 0) = 0;                      /* id = 0 ⇒ 新建 */
-        *(int32_t*)(cfg + 4) = want;                   /* portId */
-        g_capcode = 18; g_cfg_len = 0;
-        call_sret4(sac, bp, cfg, res, okflag, st6);
-        void* sv = *(void**)st6;
-        int (*gst6)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
-        printf("  ACP2: setAudioPortConfig st=%d  回包抄到=%d 字节\n",
-               sv && gst6 ? gst6(sv) : -999, g_cfg_len);
-        printf("  ACP2: 出参头 8 个 int32:");
-        for (int t = 0; t < 8; t++) printf(" %d", *(int*)(res + 4*t));
-        printf("\n  ACP2: 回包头 8 个 int32:");
-        for (int t = 0; t < 8 && 4*t < g_cfg_len; t++) printf(" %d", *(int*)(g_cfg + 4*t));
-        printf("\n"); fflush(stdout);
-        int nid = -1;
-        if (g_cfg_len >= 20) nid = *(int*)(g_cfg + 12 + 4);      /* [ex][arrSize][count][size][id] */
-        if (nid <= 0) nid = *(int*)(res + 4);                    /* 或直接从出参读 */
-        if (nid > 0) {
-          printf("  ACP2: ★新 portConfigId = %d\n", nid); fflush(stdout);
-          N.Parcel_setPos(args, 8);
-          ((int(*)(AParcel*, int32_t))N.Parcel_writeInt32)(args, nid);
-          N.Parcel_setPos(args, 0);
-        }
-        g_capcode = 15;
-      } else printf("  ACP2: 缺 BpModule::setAudioPortConfig 符号\n");
-      if (found < 0) goto apc_done;
+      if (!sac) printf("  ACP: 缺 BpModule::setAudioPortConfig 符号\n");
       {
-        int sz = *(int*)(g_cfg + found);
-        static uint8_t elem[4096];
-        memcpy(elem, g_cfg + found, (size_t)sz);
-        *(int32_t*)(elem + 4) = 0;                              /* id=0 ⇒ 新建 */
-        AParcel* in5 = NULL; AParcel* out5 = NULL;
-        int (*Prep5)(AIBinder*, AParcel**) =
-          (int(*)(AIBinder*, AParcel**))dlsym(N.ndk, "AIBinder_prepareTransaction");
-        if (Prep5 && !Prep5(b, &in5)) {
-          wI32(in5, 0);                                         /* 异常位 */
-          wI32(in5, 8 + sz);                                    /* 数组整体大小 */
-          wI32(in5, 1);                                         /* 元素个数 */
-          for (int t = 0; t < sz; t += 4) { int32_t v; memcpy(&v, elem + t, 4); wI32(in5, v); }
-          g_capcode = 18; g_cfg_len = 0;
-          int st5 = ((int(*)(AIBinder*, uint32_t, AParcel**, AParcel**, uint32_t))g_orig_tx)
-                      (b, 18, &in5, &out5, 0);
-          printf("  APC: setAudioPortConfig(18) st=%d 回包 %d 字节\n", st5, g_cfg_len);
-          fflush(stdout);
-          if (g_cfg_len >= 16) {
-            int nid = *(int*)(g_cfg + 12 + 4);
-            printf("  APC: ★新 portConfigId = %d（portId=%d，只有我们在用）\n", nid, want);
-            N.Parcel_setPos(args, 8); wI32(args, nid); N.Parcel_setPos(args, 0);
-            fflush(stdout);
+        char* vb = *(char**)&vec[0];
+        char* ve = *(char**)&vec[8];
+        long span = (long)(ve - vb);
+        char* tmpl = NULL; int stride = 0;
+        printf("  ACP: vector [%p..%p) span=%ld\n", (void*)vb, (void*)ve, span); fflush(stdout);
+        for (int cand = 32; cand <= 512 && !tmpl; cand += 8) {
+          if (span <= 0 || span % cand) continue;
+          int cnt = (int)(span / cand);
+          for (int k = 0; k < cnt; k++) {
+            int id = *(int*)(vb + (long)k*cand), port = *(int*)(vb + (long)k*cand + 4);
+            if (id < 0 || id > 4096 || port < 0 || port > 4096) break;
+            if (k == cnt - 1 && port == want) { tmpl = vb + (long)k*cand; stride = cand; }
+          }
+          if (!tmpl && span % cand == 0) {
+            for (int k = 0; k < span/cand; k++) {
+              int port = *(int*)(vb + (long)k*cand + 4);
+              if (port == want) { tmpl = vb + (long)k*cand; stride = cand; break; }
+            }
           }
         }
+        if (!sac) printf("  ACP: 没有 setAudioPortConfig 符号，跳过\n");
+        else if (!tmpl) printf("  ACP: 模板法没命中（stride 反推失败）\n");
+        else {
+          int oldid = *(int*)tmpl;
+          printf("  ACP: 模板=stride %d 里的 id=%d portId=%d ⇒ 克隆并清 id\n", stride, oldid, want);
+          *(int*)tmpl = 0;
+          static char res3[512]; memset(res3, 0, sizeof res3);
+          static char ok3[8]; memset(ok3, 0, sizeof ok3);
+          static char st7[64]; memset(st7, 0, sizeof st7);
+          g_capcode = 18; g_cfg_len = 0;
+          call_sret4(sac, bp, tmpl, res3, ok3, st7);
+          void* sv7 = *(void**)st7;
+          int (*gst7)(const void*) = (int(*)(const void*))dlsym(N.ndk, "AStatus_getStatus");
+          printf("  ACP3: st=%d ok=%d 新 config 头 8 int32:",
+                 sv7 && gst7 ? gst7(sv7) : -999, *(int*)ok3);
+          for (int t = 0; t < 8; t++) printf(" %d", *(int*)(res3 + 4*t));
+          printf("\n"); fflush(stdout);
+          *(int*)tmpl = oldid;                          /* 还原平台对象 */
+          int nid = *(int*)(res3 + 4);                  /* [id][portId] 里 portId 在 +4? 看打印再定 */
+          printf("  ACP3: res3[0]=%d res3[1]=%d\n", *(int*)res3, *(int*)(res3+4));
+          nid = *(int*)res3;
+          if (nid > 0) {
+            printf("  ACP3: ★新 portConfigId = %d（只有我们在用）\n", nid); fflush(stdout);
+            N.Parcel_setPos(args, 8);
+            ((int(*)(AParcel*, int32_t))N.Parcel_writeInt32)(args, nid);
+            N.Parcel_setPos(args, 0);
+          }
+          g_capcode = 15;
+        }
       }
+      (void)sac;
   apc_done:
       g_capcode = 15;
     }
