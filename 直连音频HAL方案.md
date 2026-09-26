@@ -803,3 +803,68 @@ AHAL_Stream_QTI: getStreamCommon: returning 0xb400…            ← 我们的�
 **PAL 真的 start 了、设备就是 `AUDIO_DEVICE_OUT_SPEAKER`**，而且全程零采样＝完全静音。
 也就是说：只要接管轮里 audioserver/HAL 不被杀掉（B′），现成的桥立刻就有声，
 不需要 FMQ 那层。A 路目前的价值只剩"接管轮内不依赖 audioserver"。
+
+## 24. 【09-26 15:2x ★A 路的正确入口找到了，而且 HAL 自带"逐字段回显"裁判】
+
+### 24.1 端口对照表（**不用逆 getAudioPorts 回包 —— logcat 里白给**）
+
+框架每次创建 port config，HAL 都明文打出来：
+
+```
+created new port config for low_latency_out      AudioPortConfig{id: 54, portId: 1
+created new port config for deep_buffer_out      AudioPortConfig{id: 55, portId: 2
+created new port config for compress_offload_out AudioPortConfig{id: 56, portId: 3
+created new port config for direct_pcm_out       AudioPortConfig{id: 57, portId: 4
+created new port config for voice_tx             AudioPortConfig{id: 59, portId: 5
+created new port config for voip_playback        AudioPortConfig{id: 60, portId: 6
+created new port config for in_call_music        AudioPortConfig{id: 61, portId: 7
+created new port config for raw_out              AudioPortConfig{id: 62, portId: 8
+created new port config for spatial_out          AudioPortConfig{id: 63, portId: 11   ← 我们一直开的就是它
+created new port config for primary_in           AudioPortConfig{id: 65, portId: 12
+created new port config for built_in_mic         AudioPortConfig{id: 64…77, portId: 41
+created new port config for speaker              AudioPortConfig{id: 53, portId: 23
+```
+（XML 侧：`/vendor/etc/audio/audio_module_config_primary.xml` 里 mixPort 顺序是
+low_latency(1) raw(2) haptics(3) **deep_buffer(4)** …；**HAL 的 portId ≠ XML 序号**，别按文档顺序推。）
+
+⇒ §17~§23 全部建立在 **63 = spatial_out** 上，usecase 自然是 `SPATIAL_PLAYBACK`；
+扬声器媒体真正对应 **`deep_buffer_out` = portId 2**。
+
+### 24.2 `idsweep.sh` 的一手结果 + 新裁判
+
+对每个候选 id 直开一次，HAL 的判词非常干脆（**比 fd 计数强得多，是显式错误**）：
+
+| id | HAL 判词 |
+|---|---|
+| 54 / 62 / 60 / 61 | `findPortIdForNewStream: port config id N already has a stream opened on it` → **被框架占着** |
+| 57 / 56 | `existing port config id N not found` → **HAL 重启后这些 config 不存在了** |
+| 55 (deep_buffer_out) | `already has a stream opened on it` → **端口对了，但框架在用**（io 21 那条） |
+
+⇒ 两条硬结论：
+1. **portConfigId 不是常量**，它随 HAL 进程生灭（框架开机创建）。所以 A 路必须自己
+   `setAudioPortConfig(AudioPortConfig{id: 0, portId: 2, …})` 拿一个**属于我们的新 id**，
+   再 openOutputStream。
+2. 好消息：`setAudioPortConfig` 的裁判是 HAL 把收到的结构**逐字段明文打回来**
+   （`setAudioPortConfig: requested AudioPortConfig{id: 0, portId: 5, sampleRate: Int{value: 48000},
+   channelMask: AudioChannelLayout{layoutMask: 3}, format: AudioFormatDescription{type: PCM, pcm: INT_16_BIT, encoding: }, gain: (null), flags: AudioIoFlags{…}`）
+   —— 打包对不对当场可读，字段顺序也直接照这段抄。
+
+### 24.3 下一轮的具体动作（照这个做，不要回头再猜）
+
+1. 按 §24.2 打印出的顺序手搓 AudioPortConfig：
+   `[id=0][portId=2][IntConfigVal{48000}][AudioChannelLayout{layoutMask=3}]
+    [AudioFormatDescription{type=PCM(1), pcm=INT_16_BIT(1), encoding=""}]`
+   （子 parcelable 都用平台的 `writeToParcel` 打包，抄 §16 的 MINE==THEIRS 做法）
+   `+ [flags: AudioIoFlags{input=0, output=DEEP_BUFFER(4)}]`；
+2. 发 `IModule.setAudioPortConfig`，从回包/日志取**新 id**；
+3. `openOutputStream(新 id)` ⇒ 期望 `AHAL_StreamOut_QTI: start` 出现（这次 usecase 应是 DEEP_BUFFER_PLAYBACK）；
+4. 若仍无 start：`updateMetadata` 已验证发得出去（码 2 status=0），再试 `setLatencyMode`(码 11)/`selectPresentation`(码 14)；
+5. start 一到，按 §23.1 的偏移（数据区 +16、element 计数器 +0/+8 u64）喂**零帧**，
+   判据＝对侧计数器推进。
+
+### 24.4 设备现场
+
+- 现在在 **anland**；audio HAL 被重启过多次，最后一次重启后框架自己重建了 config（HAL fd=76）；
+  我这轮直开的流都在进程退出时随 binder 死亡自动关闭（日志有 `~StreamOutPrimary`）。
+- 后台 `aa-bridge` 已清理（`pkill -x`），没有遗留 AAudio 流。
+- 本轮全部实验都是**零采样**，没有外放过任何声音。
