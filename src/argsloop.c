@@ -476,6 +476,14 @@ int auto_build(void* h) {
   static char sret[32];
   if (getenv("GOT")) {
     g_orig_tx = (void*)dlsym(N.ndk, "AIBinder_transact");
+    /* bionic 的 lazy PLT：GOT 槽要等第一次调用才写成函数地址 ⇒ 先用 getAudioPorts 走一遍同一个槽 */
+    void* gaps = dlsym(h, "_ZN4aidl7android8hardware5audio4core8BpModule13getAudioPortsEPNSt3__16vectorINS0_5media5audio6common9AudioPortENS5_9allocatorISA_EEEE");
+    if (gaps) {
+      static char vec[64]; memset(vec, 0, sizeof vec);
+      static char ws[32];
+      call_sret3(gaps, bp, vec, vec, ws);
+      printf("GOT 预热 getAudioPorts vec=[%p,%p]\n", *(void**)&vec[0], *(void**)&vec[8]); fflush(stdout);
+    } else printf("GOT 预热：没找到 getAudioPorts 符号\n");
     printf("GOT 安装：real=%p\n", g_orig_tx); fflush(stdout);
     install_got_hook("android.hardware.audio.core-V4-ndk.so", g_orig_tx);
     g_gotcap = 1;
