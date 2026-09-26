@@ -116,6 +116,33 @@ static int my_tx(AIBinder* b, uint32_t code, AParcel** in, AParcel** out, uint32
   return r;
 }
 static const char* g_mod = "android.hardware.audio.core-V4-ndk.so";
+
+/* scudo 的堆指针带 0xb400… 顶层 tag，任何"按数值范围判指针"的写法都会把它们全滤掉
+ * （STREAM 扫描就是这么连续几轮扫到空的）。唯一可信的判据：这个地址在我自己进程的
+ * 某条可读映射里。映射表读一次缓存起来。 */
+static struct { unsigned long a, b; char r; } g_mmap[1024];
+static int g_nmmap;
+static void load_maps(void) {
+  if (g_nmmap) return;
+  FILE* f = fopen("/proc/self/maps", "r");
+  if (!f) return;
+  char line[512];
+  while (fgets(line, sizeof line, f) && g_nmmap < (int)(sizeof g_mmap / sizeof *g_mmap)) {
+    unsigned long a, b; char perm[8];
+    if (sscanf(line, "%lx-%lx %4s", &a, &b, perm) != 3) continue;
+    g_mmap[g_nmmap].a = a; g_mmap[g_nmmap].b = b; g_mmap[g_nmmap].r = (perm[0] == 'r');
+    g_nmmap++;
+  }
+  fclose(f);
+}
+static int readable(void* p) {
+  unsigned long v = (unsigned long)p & ((1UL << 48) - 1);   /* 去掉 scudo/MTE 的顶层 tag */
+  if ((unsigned long)p < 0x1000 || v < 0x1000) return 0;
+  load_maps();
+  for (int i = 0; i < g_nmmap; i++)
+    if (v >= g_mmap[i].a && v + 8 <= g_mmap[i].b && g_mmap[i].r) return 1;
+  return 0;
+}
 static int install_got_hook(const char* modname, void* real) {
   /* 槽地址 = 模块载入基址 + .rela.plt 给的静态偏移（AIBinder_transact = 0x5b400，
    * 由 pull 下来的 core-V4-ndk.so 反解 PLT 得到；调用点 openOutputStream+0xdc → bl plt(0x55ed8)）。 */
@@ -540,19 +567,25 @@ int auto_build(void* h) {
   int (*rFd)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readParcelFileDescriptor");
   int (*rFd2)(AParcel*, int*) = (int(*)(AParcel*, int*))dlsym(N.ndk, "AParcel_readFileDescriptor");
   AIBinder* stream = NULL;
-  for (int off = 0; off + 16 <= (int)sizeof(ret); off += 8) {
+  printf("RETSHEAP ");
+  for (int off = 0; off < 128; off += 8) { void* w = *(void**)(ret + off);
+    printf("%d=%p%s ", off, w, readable(w) ? "*" : ""); }
+  printf("\n"); fflush(stdout);            /* 带 * 的是我进程里真能读的地址 */
+  for (int off = 0; off + 16 <= 128; off += 8) {   /* 只扫 Return 头部，别拿随机指针往别的 binder 对象发事务 */
     void* cand = *(void**)(ret + off);
-    if ((uintptr_t)cand < 0x1000 || (uintptr_t)cand >= (1UL<<48)) continue;   /* scudo 指针是 0xb400…，上界要放到 48 位 */
+    if (!readable(cand)) continue;                 /* 带 scudo tag 的堆指针，按数值范围判必全灭 */
     void* vptr = *(void**)cand;
-    if ((uintptr_t)vptr < 0x1000) continue;
-    void* maybe = *(void**)((char*)cand + 8);
-    if (!maybe) continue;
+    if (!readable(vptr)) continue;
+    void* maybe = *(void**)((char*)cand + 8);      /* BpInterface 的 mRemoteBinder */
+    if (!readable(maybe)) continue;
     AParcel* in3 = NULL; AParcel* out3 = NULL;
     printf("  cand ret+%d = %p vptr=%p +8=%p\n", off, cand, vptr, maybe); fflush(stdout);
     if (!Prep2((AIBinder*)maybe, &in3)) {
       N.Parcel_writeInt32(in3, 0);
       int s3 = Tx2((AIBinder*)maybe, 1, &in3, &out3, 0);
       size_t sz3 = out3 ? N.Parcel_dataSize(out3) : 0;
+      if (s3 != 0 || sz3 <= 4)
+        printf("  getStreamCommon 未成: st=%d reply=%zu\n", s3, sz3);
       if (s3 == 0 && sz3 > 4) {
         printf("STREAM 命中: ret+%d cand=%p vptr=%p binder=%p getStreamCommon st=%d reply=%zu\n",
                off, cand, vptr, maybe, s3, sz3); fflush(stdout);
