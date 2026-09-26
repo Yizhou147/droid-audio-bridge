@@ -137,6 +137,27 @@ static void load_maps(void) {
   }
   fclose(f);
 }
+/* fd 猎取：把一块内存里所有"0..4096 的小整数"当 fd 试 fstat，并读 /proc/self/fd/N 的指向。
+ * openOutputStream 的回包有 533 字节，远超"一个 binder 句柄"所需 —— 平台解析后，
+ * 里面的 fd（若有）要么落在 Return 结构里，要么还在回包的对象表里，两种都扫。 */
+static void hunt_fds(const char* tag, const void* buf, int len) {
+  int hits = 0;
+  for (int k = 0; k + 4 <= len; k += 4) {
+    int v; memcpy(&v, (const char*)buf + k, 4);
+    if (v <= 0 || v > 1024) continue;
+    struct stat sb;
+    if (fstat(v, &sb) != 0) continue;
+    char path[256], link[256];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", v);
+    ssize_t n = readlink(path, link, sizeof link - 1);
+    if (n > 0) link[n] = 0; else snprintf(link, sizeof link, "?");
+    printf("  %s+%d = fd %d  ->  %s  size=%lld\n", tag, k, v, link, (long long)sb.st_size);
+    hits++;
+  }
+  if (!hits) printf("  %s: 没有像 fd 的值\n", tag);
+  fflush(stdout);
+}
+
 /* 在一个 AIDL Bp 对象里找真句柄：某个 word 的 vptr 属于 libbinder*（即 AIBinder 的实现类）。
  * 不猜成员偏移 —— BpStreamOut 的句柄实测在 obj+32，猜 +8 拿到的是引用计数。 */
 static int readable(void* p);
