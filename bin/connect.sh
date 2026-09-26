@@ -5,6 +5,7 @@
 # 全程零载荷（静音），一帧真实数据都不发。
 # 用法：sh connect.sh            新建 patch（id=-1）
 #       PIDF=1 sh connect.sh     改成"更新框架那条 patch 1"
+# 出声档（要用户点头才能用）：TONE=440 AMP=3.2e7 ROUNDS=60 sh connect.sh
 set -u
 M=/data/local/tmp/conn.log
 PIDF="${PIDF:--1}"
@@ -13,6 +14,7 @@ sleep 3
 echo "audioserver=$(getprop init.svc.audioserver)"
 logcat -c
 DBG=1 APC=1 APCPORT=2 LOAD=/data/local/tmp/mix2.bin LOAD2=/data/local/tmp/dev23.bin DEVPORT=23 \
+  TONE="${TONE:-}" AMP="${AMP:-}" ROUNDS="${ROUNDS:-}" SLEEPMS="${SLEEPMS:-}" \
   PP=1 LOADP=/data/local/tmp/patch0.bin PAUTO=1 SENDP=1 POKE=0:"$PIDF" \
   GOT=1 AUTO=1 TRANSACT=1 STREAM=1 SESSION=1 \
   SVC=android.hardware.audio.core.IModule/default \

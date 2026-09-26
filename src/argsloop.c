@@ -21,6 +21,7 @@
 #include <linux/futex.h>
 #include <unistd.h>
 #include <time.h>
+#include <math.h>
 
 typedef void AParcel;
 typedef void AIBinder;
@@ -1573,18 +1574,42 @@ int auto_build(void* h) {
     /* 输出方向的正确用法：先把数据投进 dataMQ（环形位置 = 写指针 % 容量），
      * 再发 burst(N) 告诉 HAL "刚写了 N 字节"；Reply.fmqByteCount = 它真消费的字节数。
      * 载荷全零 ⇒ 全程静音。 */
-    for (int iter = 0; iter < 8; iter++) {
-      int chunk = 1920;                                /* 240 帧 × 8 字节 */
-      if ((uint64_t)chunk > dcap) chunk = (int)dcap;
-      uint64_t wp = *(uint64_t*)(dq + 8) % dcap;
-      size_t first = dcap - wp;                         /* 环形回绕 */
-      memset(dq + 16 + wp, 0, (size_t)chunk < first ? (size_t)chunk : first);
-      if ((size_t)chunk > first) memset(dq + 16, 0, (size_t)chunk - first);
+    /* TONE=<hz>：写正弦而不是零（出声！只在用户点头后用）。
+     * 同时把"生产者必须自己看剩余空间"补上 —— 之前固定投 1920 且不看 rp，
+     * 静音时无所谓，连续投真信号会盖掉 HAL 还没读的槽。 */
+    int tones = flag("TONE") ? atoi(getenv("TONE")) : 0;
+    double amp = getenv("AMP") ? atof(getenv("AMP")) : 3.2e7;   /* ≈16 位满幅的 1/2000 ⇒ 很轻 */
+    int rounds = getenv("ROUNDS") ? atoi(getenv("ROUNDS")) : (tones ? 60 : 8);
+    int slp = getenv("SLEEPMS") ? atoi(getenv("SLEEPMS")) : (tones ? 25 : 700);
+    unsigned long long gframe = 0;                      /* 相位连续，跨轮不跳变 */
+    for (int iter = 0; iter < rounds; iter++) {
+      uint64_t rp64 = *(uint64_t*)(dq + 0), wp64 = *(uint64_t*)(dq + 8);
+      uint64_t avail = dcap - (wp64 - rp64);            /* 还能塞多少字节 */
+      int want = tones ? 8192 : 1920;
+      int chunk = (int)(avail < (uint64_t)want ? avail : (uint64_t)want);
+      chunk -= chunk % 8;                               /* 2 声道 × int32 = 8 字节/帧 */
+      if (chunk <= 0) { usleep(20000); continue; }      /* 满了就等消费者 */
+      uint64_t wp = wp64 % dcap;
+      if (tones) {
+        int nf = chunk / 8;
+        for (int f = 0; f < nf; f++) {
+          int32_t v = (int32_t)(amp * sin(2.0 * M_PI * (double)tones *
+                                          (double)(gframe + (unsigned long long)f) / 48000.0));
+          uint64_t o1 = (wp + (uint64_t)f * 8) % dcap, o2 = (wp + (uint64_t)f * 8 + 4) % dcap;
+          memcpy(dq + 16 + o1, &v, 4);
+          memcpy(dq + 16 + o2, &v, 4);
+        }
+        gframe += (unsigned long long)nf;
+      } else {
+        size_t first = dcap - wp;                       /* 环形回绕 */
+        memset(dq + 16 + wp, 0, (size_t)chunk < first ? (size_t)chunk : first);
+        if ((size_t)chunk > first) memset(dq + 16, 0, (size_t)chunk - first);
+      }
       *(uint64_t*)(dq + 8) += (uint64_t)chunk;
       *(uint32_t*)(dq + dflag) |= 2;
       syscall(SYS_futex, dq + dflag, FUTEX_WAKE, 0x7fffffff, NULL, NULL, 0);
       SEND_CMD(3, chunk);                              /* burst(N) */
-      usleep(700000);
+      usleep((useconds_t)slp * 1000u);
       TAKE_REPLY(rpy);
       printf("  SESSION 轮%d: 投 %d 字节 burst(%d) -> Reply{status=%d 消费=%d state=%d} "
              "obs=%lld hw=%lld lat=%d xrun=%d data 读=%llu 写=%llu\n", iter, chunk, chunk,

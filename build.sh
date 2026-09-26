@@ -55,7 +55,7 @@ CC_C="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android33-clang"
 
 # 以平台 readFromParcel 为裁判的参数迭代器（一次构建、设备上反复喂 IN，不用 CI）
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
-    -Wl,--export-dynamic src/argsloop.c -o out/argsloop
+    -Wl,--export-dynamic src/argsloop.c -o out/argsloop -lm
 
 # 数据面取证：open→取 IStreamOut→getStreamCommon→找 FMQ fd
 "$CC_C" -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -fPIE -pie \
