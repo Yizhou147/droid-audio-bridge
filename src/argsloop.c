@@ -1578,9 +1578,11 @@ int auto_build(void* h) {
      * 同时把"生产者必须自己看剩余空间"补上 —— 之前固定投 1920 且不看 rp，
      * 静音时无所谓，连续投真信号会盖掉 HAL 还没读的槽。 */
     int tones = flag("TONE") ? atoi(getenv("TONE")) : 0;
-    double amp = getenv("AMP") ? atof(getenv("AMP")) : 3.2e7;   /* ≈16 位满幅的 1/2000 ⇒ 很轻 */
-    int rounds = getenv("ROUNDS") ? atoi(getenv("ROUNDS")) : (tones ? 60 : 8);
-    int slp = getenv("SLEEPMS") ? atoi(getenv("SLEEPMS")) : (tones ? 25 : 700);
+    /* 一律用 flag()：脚本里 TONE/AMP/ROUNDS 传的是空串，空串也算"已设置"，
+     * 按 getenv 判就会 atoi("")=0 ⇒ 上一版轮数成 0，一帧都没投（也就没出声）。 */
+    double amp = flag("AMP") ? atof(getenv("AMP")) : 3.2e7;      /* 满幅的 1.5% ⇒ 很轻 */
+    int rounds = flag("ROUNDS") ? atoi(getenv("ROUNDS")) : (tones ? 60 : 8);
+    int slp = flag("SLEEPMS") ? atoi(getenv("SLEEPMS")) : (tones ? 25 : 700);
     unsigned long long gframe = 0;                      /* 相位连续，跨轮不跳变 */
     for (int iter = 0; iter < rounds; iter++) {
       uint64_t rp64 = *(uint64_t*)(dq + 0), wp64 = *(uint64_t*)(dq + 8);

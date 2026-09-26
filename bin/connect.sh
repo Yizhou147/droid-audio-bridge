@@ -3,7 +3,7 @@
 # 然后开 DEEP_BUFFER 流、start、投零字节，看 HAL 的 configure 还报不报
 # "no connected devices on stream!!"，以及 Reply.hardware.frames 是否推进。
 # 全程零载荷（静音），一帧真实数据都不发。
-# 用法：sh connect.sh            新建 patch（id=-1）
+# 用法：PIDF=0 sh connect.sh        新建 patch（★id 必须是 0，-1/别的 id 会被 HAL 拒）
 #       PIDF=1 sh connect.sh     改成"更新框架那条 patch 1"
 # 出声档（要用户点头才能用）：TONE=440 AMP=3.2e7 ROUNDS=60 sh connect.sh
 set -u
