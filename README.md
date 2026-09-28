@@ -1,3 +1,5 @@
+中文 | [English](README_english.md)
+
 # droid-audio-bridge
 
 在小米 Pad 8 Pro（SM8750/piano）的 **DRM 接管态** Linux 桌面里，让声音从**内置扬声器**出来。
