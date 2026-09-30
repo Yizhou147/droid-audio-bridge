@@ -1552,9 +1552,33 @@ ROT=1 ROTONLY=1 … argsloop      # bin/halrot.sh <n>：只发调用不开流、
 
 ---
 
-## 40. 待办：接管轮里物理音量键无效（09-26 取证完毕，下次直接动手）
+## 40. 【09-30 定案】接管轮物理音量键：根因=kded 模块没加载，已修
 
-### 40.1 现象与根因
+> 09-26 的本节旧取证（"音量键在 gpio-keys=event0、kwin 一个 /dev 都没有、需自造 evdev 读者
+> + xdotool 注入"）**已被 09-30 实测推翻**，结论以本节为准，旧细节见 git 历史。
+
+- **按键事件链本来就是通的**：音量+/-由内核 virtual 设备 **"Xiaomi Consumer"(/dev/input/event10)**
+  上报 `KEY_VOLUMEUP(115)/KEY_VOLUMEDOWN(114)`（"Xiaomi Keyboard"=event7 也带这两个码）；
+  gpio-keys/event0 的 EV_KEY 能力为空，09-26 把它当音量键节点是认错设备。
+  本轮 kwin 直接持有 event0/2/…/10 全部 fd（`fuser /dev/input/event10`=kwin_wayland），
+  libinput 把 event10 认成 `keyboard pointer, Seat: seat0` ⇒ 按键已进 kwin。
+- **真断点**：音量快捷键 `[kmix] increase_volume/decrease_volume` 的处理者是 kded6 模块
+  **`audioshortcutsservice`**（plasma-pa 4:6.6.4 带的
+  `/usr/lib/aarch64-linux-gnu/qt6/plugins/kf6/kded/audioshortcutsservice.so`）。
+  接管轮里 kded6 虽被 desk-takeover 拉起，但**没人触发它加载该模块**
+  ⇒ `org.kde.KWin /component/kmix` 的 `isActive` = false，快捷键到 kwin 后无人处理。
+- **修复（已进 desk-takeover.sh 4b' 段）**：kded 起来后显式
+  `busctl --user call org.kde.kded6 /kded org.kde.kded6 loadModule s audioshortcutsservice`
+  （幂等，成功回 `b true`，脚本打 `AUDIOKEY-OK/FAIL`）；随后
+  `busctl --user call org.kde.KWin /component/kmix org.kde.kglobalaccel.Component invokeShortcut s increase_volume`
+  实测驱动 PipeWire 音量变化，用户按物理键确认可调。
+- **注意**：模块加载后 `DISPLAY=:0 xdotool key XF86AudioRaiseVolume` 仍**不**触发快捷键
+  （09-26 的 xdotool 实证只在当时组件活着/环境成立；XTEST→kwin 全局快捷键过滤待查）。
+  验证快捷键一律用 `invokeShortcut`，别拿 xdotool 当判据。
+- 旧方案的 evdev 读者（volkeys.py）与 `/proc/interrupts` 轮询路线**全部作废，不需要**；
+  也就不用碰 09-22 那类额外读者风险。
+
+### 40.1 现象与根因（09-26 旧取证，已作废，见上方定案）
 轮里按物理音量+/- 没有任何反应。根因：**`system_server` 在轮里是死的**（实测 `ps -A` 只剩
 `audiohalservice.qti`），平时是它读按键并转成音量事件；容器侧也**没有任何进程读那个节点**：
 - `/proc/bus/input/devices`：`gpio-keys` → **event0**；
