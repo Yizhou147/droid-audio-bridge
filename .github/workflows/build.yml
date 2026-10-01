@@ -10,7 +10,10 @@ on:
     paths:
       - "src/**"
       - "build.sh"
+      - "device-assets/**"
       - ".github/workflows/build.yml"
+    tags:
+      - "v*"          # 打 tag 才出 release 资产（安装器只认 release，不认 Actions artifact）
 
 jobs:
   build:
@@ -58,3 +61,39 @@ jobs:
           name: audio-bridge-bins
           path: out/
           if-no-files-found: error
+
+  # 安装器要的是**公开 release 资产**：Actions artifact 需要登录才能取，镜像站也拿不到
+  # （droid-drm-takeover 那边已经因此踩过一次）。所以产物除了 artifact 上传，还要发 release。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: audio-bridge-bins
+          path: out/
+
+      - name: 打包设备侧产物
+        run: |
+          set -euo pipefail
+          STAGE=audio-bridge
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          # 设备侧（/data/local/tmp）需要的全部东西：常驻 sink 可执行 + 启动脚本 + 机型线节模板
+          cp out/argsloop "$STAGE"/
+          cp bin/halsink.sh "$STAGE"/
+          cp device-assets/mix2.bin device-assets/dev23.bin device-assets/patch0.bin "$STAGE"/
+          # 架构自检：装到安卓上跑不起来的二进制没有意义，宁可不出包
+          file "$STAGE/argsloop" | grep -q 'ARM aarch64'
+          tar -czf audio-bridge-piano-aarch64.tar.gz "$STAGE"
+          rm -rf "$STAGE"
+          sha256sum audio-bridge-piano-aarch64.tar.gz
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true          # 与主仓同一规矩：CI 永不自动公开，人工验证后再发
+          files: audio-bridge-piano-aarch64.tar.gz

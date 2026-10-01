@@ -1,3 +1,5 @@
 out/
 artifact/
+# 例外：机型 AudioPortConfig 线节模板是**设备侧运行必需**的资产，必须入库
+!device-assets/
 *.o
